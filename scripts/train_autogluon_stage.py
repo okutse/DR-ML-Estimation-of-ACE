@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
@@ -113,11 +112,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample", type=Path, default=DEFAULT_SAMPLE_PATH)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num-folds", type=int, default=5)
+    parser.add_argument("--num-folds", type=int, default=10)
     # parser.add_argument("--presets", type=str, default="medium_quality")
     parser.add_argument("--presets", type=str, default="good_quality")
     parser.add_argument("--time-limit", type=int, default=0)
-    parser.add_argument("--secondary-stratify", type=str, nargs="*", default=None)
+    parser.add_argument(
+        "--secondary-stratify",
+        type=str,
+        nargs="*",
+        default=["CANCER_TYPE_DETAILED", "ER_STATUS"],
+    )
     parser.add_argument(
         "--threshold-metric",
         type=str,
@@ -151,10 +155,17 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Stacking levels inside AutoGluon (set 0 to disable).",
     )
+    parser.add_argument(
+        "--stratify-min-count",
+        type=int,
+        default=5,
+        help="Minimum samples per stratum for secondary stratification.",
+    )
     return parser.parse_args()
 
 
 def read_sample_clinical(sample_path: Path) -> pd.DataFrame:
+    """Read clinical sample data from tab-separated file, skipping header rows."""
     if not sample_path.exists():
         raise FileNotFoundError(f"Missing sample file: {sample_path}")
     df = pd.read_csv(sample_path, sep="\t", skiprows=[0, 1, 2, 3])
@@ -176,6 +187,11 @@ def merge_sample_clinical(merged_df: pd.DataFrame, sample_df: pd.DataFrame) -> p
 
 
 def map_stage(series: pd.Series) -> Tuple[pd.Series, pd.Series]:
+    """Map tumor stage to binary (early=0, late=1) and return validity mask.
+    
+    Early: stages 0, 1, 2 -> 0
+    Late: stages 3, 4 -> 1
+    """
     stage_num = pd.to_numeric(series, errors="coerce")
     mapped = stage_num.map({0: 0, 1: 0, 2: 0, 3: 1, 4: 1}).astype("float")
     mask = mapped.notna().astype(int)
@@ -303,9 +319,14 @@ def plot_pr(y_true: np.ndarray, y_proba: np.ndarray, out_path: Path) -> None:
 
 
 def plot_calibration(y_true: np.ndarray, y_proba: np.ndarray, out_path: Path) -> None:
+    """Plot calibration curve comparing predicted probabilities to actual outcomes."""
     if len(np.unique(y_true)) < 2:
         return
-    frac_pos, mean_pred = calibration_curve(y_true, y_proba, n_bins=10)
+    try:
+        frac_pos, mean_pred = calibration_curve(y_true, y_proba, n_bins=10)
+    except ValueError as e:
+        LOGGER.warning("Calibration curve failed: %s", e)
+        return
     plt.figure(figsize=(6, 6))
     plt.plot([0, 1], [0, 1], "k--", label="Perfect")
     plt.plot(mean_pred, frac_pos, "s-", label="Model")
@@ -389,6 +410,11 @@ def run_shap(
     explainer = shap.KernelExplainer(predict_proba, sample)
     shap_values = explainer.shap_values(sample, nsamples=min(200, len(sample)))
     shap_values = np.array(shap_values)
+
+    # Handle 3D array from binary classification (class x samples x features)
+    if shap_values.ndim == 3:
+        # Use positive class (index 1) SHAP values
+        shap_values = shap_values[1] if shap_values.shape[0] == 2 else shap_values[0]
 
     mean_abs = np.abs(shap_values).mean(axis=0)
     shap_df = pd.DataFrame({"feature": X.columns, "mean_abs_shap": mean_abs})
@@ -488,6 +514,7 @@ def main() -> None:
         "disable_ray": args.disable_ray,
         "num_bag_folds": args.num_bag_folds,
         "num_stack_levels": args.num_stack_levels,
+        "stratify_min_count": args.stratify_min_count,
     }
     (args.output / "run_config.json").write_text(json.dumps(run_cfg, indent=2))
 
@@ -499,7 +526,9 @@ def main() -> None:
     LOGGER.info("Using %s feature columns", len(feature_cols))
 
     y = train_df[TARGET_COL].astype(int)
-    strat_labels = build_stratify_labels(train_df, y, args.secondary_stratify)
+    strat_labels = build_stratify_labels(
+        train_df, y, args.secondary_stratify, min_count=args.stratify_min_count
+    )
 
     skf = StratifiedKFold(n_splits=args.num_folds, shuffle=True, random_state=args.seed)
 
@@ -546,12 +575,10 @@ def main() -> None:
         leaderboard = predictor.leaderboard(val_data, silent=True)
         leaderboard.to_csv(fold_dir / "leaderboard.csv", index=False)
 
-        pred_val = predictor.predict(val_split[feature_cols])
         pred_val_proba = predictor.predict_proba(val_split[feature_cols])
         if isinstance(pred_val_proba, pd.DataFrame):
             pred_val_proba = pred_val_proba.iloc[:, 1].values
 
-        pred_train = predictor.predict(train_split[feature_cols])
         pred_train_proba = predictor.predict_proba(train_split[feature_cols])
         if isinstance(pred_train_proba, pd.DataFrame):
             pred_train_proba = pred_train_proba.iloc[:, 1].values
