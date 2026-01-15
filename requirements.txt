@@ -1,0 +1,7 @@
+# # Requirements for data merging script
+pandas>=2.0.0
+pyarrow>=14.0.0  # Required for feather format
+numpy>=1.24.0
+matplotlib>=3.7.0
+matplotlib-venn>=0.11.7
+upsetplot>=0.7.3
