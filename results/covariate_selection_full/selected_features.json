@@ -1,0 +1,58 @@
+{
+  "method": "single_model_refit_full",
+  "top_10_features": [
+    "TUMOR_SIZE",
+    "NPI",
+    "LYMPH_NODES_EXAMINED_POSITIVE",
+    "GRADE",
+    "COHORT",
+    "RFS_MONTHS",
+    "RFS_STATUS",
+    "OS_MONTHS",
+    "AGE_AT_DIAGNOSIS",
+    "CHEMOTHERAPY"
+  ],
+  "top_20_features": [
+    "TUMOR_SIZE",
+    "NPI",
+    "LYMPH_NODES_EXAMINED_POSITIVE",
+    "GRADE",
+    "COHORT",
+    "RFS_MONTHS",
+    "RFS_STATUS",
+    "OS_MONTHS",
+    "AGE_AT_DIAGNOSIS",
+    "CHEMOTHERAPY",
+    "BREAST_SURGERY",
+    "ER_STATUS",
+    "INTCLUST",
+    "TMB_NONSYNONYMOUS",
+    "RADIO_THERAPY",
+    "CANCER_TYPE_DETAILED",
+    "VITAL_STATUS",
+    "CLAUDIN_SUBTYPE",
+    "OS_STATUS",
+    "HORMONE_THERAPY"
+  ],
+  "threshold_features": {
+    "threshold": 0.01,
+    "features": [
+      "TUMOR_SIZE",
+      "NPI",
+      "LYMPH_NODES_EXAMINED_POSITIVE"
+    ],
+    "n_features": 3
+  },
+  "cumulative_80pct_features": {
+    "features": [
+      "TUMOR_SIZE",
+      "NPI",
+      "LYMPH_NODES_EXAMINED_POSITIVE",
+      "GRADE",
+      "COHORT",
+      "RFS_MONTHS",
+      "RFS_STATUS"
+    ],
+    "n_features": 7
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "n_folds": "10",
+  "test_size": "0.2",
+  "presets": "good_quality",
+  "time_limit": "3600",
+  "seed": "42",
+  "nested_cv": "True"
+}
