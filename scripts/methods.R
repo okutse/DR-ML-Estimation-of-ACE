@@ -34,9 +34,6 @@ library(foreach)      # parallel loops
 library(boot)        # for inverse logit function
 library(ggvenn)      # for Venn diagrams)
 
-library(clusterProfiler) # for GSEA
-library(org.Hs.eg.db)    # for GSEA gene annotation
-library(enrichplot)     # for GSEA plots
 library(pathview)         # for KEGG pathway visualization
 library(msigdbr)       # MSigDB gene sets
 library(GSVA)          # pathway activity scoring
@@ -858,17 +855,11 @@ ggsave(boxplot_top_degs,
 )
 
 #################################################################################
-# Gene set enrichment analysis ----
+# GSVA-driven pathway ranking ----
 ################################################################################
-# In this section, we perform GSEA using clusterProfiler on the limma results. Specifically, we (1) TO DO: confirm that the we use the genes found to be significantly differentially expressed between the cancer stages
-
-
-# Using clusterProfiler for GSEA 
-gene_ranks <- res_limma$logFC
-names(gene_ranks) <- res_limma$gene
-gene_ranks <- gene_ranks[!is.na(names(gene_ranks))]
-gene_ranks <- gene_ranks[!duplicated(names(gene_ranks))]
-gene_ranks <- sort(gene_ranks, decreasing = TRUE)
+# In this section, we use GSVA's built-in ranking to score pathway activity directly
+# (no GSEA-derived gene ranks). We then select the pathway with the strongest
+# GSVA score contrast between tumor stages in the training split.
 
 # Curate breast cancer relevant gene sets from MSigDB (C2:CGP). Fallback to Hallmark if empty.
 # retrieve gene sets and their member genes from the human genome collections using the molecular signatures database (MSigDB) curated gene set canonical pathways (C2:CGP) related to breast cancer.
@@ -889,66 +880,84 @@ if (!nrow(bc_terms)) {
 }
 
 # use clusterProfiler for GSEA 
-bc_gsea <- clusterProfiler::GSEA(
-  geneList = gene_ranks,
-  TERM2GENE = bc_terms,
-  minGSSize = 10,
-  maxGSSize = 500,
-  pAdjustMethod = "BH",
-  pvalueCutoff = 0.05, # need to change this
+bc_gene_sets <- split(bc_terms$gene_symbol, bc_terms$gs_name)
+bc_gene_sets <- lapply(bc_gene_sets, function(genes) {
+  intersect(genes, rownames(expr_splits$train))
+})
+bc_gene_sets <- bc_gene_sets[lengths(bc_gene_sets) >= 10]
+
+if (!length(bc_gene_sets)) {
+  stop("No MSigDB gene sets overlap with the expression matrix after filtering.")
+}
+
+train_ids <- colnames(expr_splits$train)
+train_stage <- dt_train$tumor_stage[match(train_ids, dt_train$patient_id)]
+stage_factor <- factor(train_stage)
+
+if (any(is.na(stage_factor)) || length(unique(stage_factor)) < 2) {
+  stop("Tumor stage labels are missing or have fewer than two groups; cannot rank pathways.")
+}
+
+gsva_rank_param <- GSVA::gsvaParam(
+  exprData = expr_splits$train,
+  geneSets = bc_gene_sets,
+  minSize = 10,
+  maxSize = 500,
+  kcdf = "Gaussian",
   verbose = FALSE
 )
+gsva_rank_scores <- GSVA::gsva(gsva_rank_param)
 
-gsea_res_tbl <- bc_gsea@result %>%
-  as.data.frame() %>%
-  dplyr::arrange(p.adjust)
+mean_early <- matrixStats::rowMeans2(gsva_rank_scores[, stage_factor == "early", drop = FALSE])
+mean_late <- matrixStats::rowMeans2(gsva_rank_scores[, stage_factor == "late", drop = FALSE])
+delta <- mean_late - mean_early
 
-if (!"qvalues" %in% names(gsea_res_tbl)) {
-  gsea_res_tbl <- gsea_res_tbl %>% dplyr::mutate(qvalues = p.adjust)
-}
+pvals <- apply(gsva_rank_scores, 1, function(x) {
+  stats::t.test(x[stage_factor == "late"], x[stage_factor == "early"])$p.value
+})
 
-gsea_top_tbl <- gsea_res_tbl %>%
-  dplyr::select(ID, Description, NES, p.adjust, qvalues, setSize) %>%
+gsva_rank_tbl <- data.frame(
+  ID = rownames(gsva_rank_scores),
+  mean_early = mean_early,
+  mean_late = mean_late,
+  delta = delta,
+  p_value = pvals,
+  p_adjust = stats::p.adjust(pvals, method = "BH"),
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::arrange(p_adjust, desc(abs(delta)))
+
+gsva_top_tbl <- gsva_rank_tbl %>%
   dplyr::slice_head(n = 10)
 
-print("Top GSEA pathways:")
-print(gsea_top_tbl)
+print("Top GSVA-ranked pathways:")
+print(gsva_top_tbl)
 
-gsea_plot_df <- gsea_res_tbl %>%
-  dplyr::filter(!is.na(qvalues), qvalues <= 0.25) %>%
-  dplyr::slice_head(n = 15)
+gsva_plot_df <- gsva_rank_tbl %>%
+  dplyr::slice_head(n = 15) %>%
+  dplyr::mutate(ID = stats::reorder(ID, delta))
 
-if (!nrow(gsea_plot_df)) {
-  warning("No pathways satisfied q ≤ 0.25; plotting top 15 pathways by adjusted p-value instead.")
-  gsea_plot_df <- gsea_res_tbl %>% dplyr::slice_head(n = 15)
-}
-
-gsea_plot_df <- gsea_plot_df %>%
-  dplyr::mutate(Description = stats::reorder(Description, NES))
-
-gsea_plot <- ggplot(gsea_plot_df, aes(x = NES, y = Description, size = setSize, color = -log10(p.adjust))) +
+gsva_rank_plot <- ggplot(gsva_plot_df, aes(x = delta, y = ID, size = abs(delta), color = -log10(p_adjust))) +
   geom_point(alpha = 0.85) +
   scale_color_gradient(low = "#97C4BC", high = "#1F78B4", name = "-log10 adj p") +
   labs(
-    title = "Breast cancer relevant GSEA",
-    subtitle = "MSigDB curated sets",
-    x = "Normalized Enrichment Score (NES)",
+    title = "Breast cancer relevant GSVA ranking",
+    subtitle = "Top pathways by GSVA score contrast (late vs early)",
+    x = "GSVA score delta (late - early)",
     y = NULL,
-    size = "Gene set size"
+    size = "Absolute delta"
   ) +
   theme_nature()
-gsea_plot
+gsva_rank_plot
 
-selected_pathway <- gsea_res_tbl %>%
-  dplyr::filter(!is.na(p.adjust)) %>%
-  dplyr::slice_head(n = 1)
+selected_pathway <- gsva_rank_tbl %>% dplyr::slice_head(n = 1)
 
 if (!nrow(selected_pathway)) {
-  stop("No pathways returned by GSEA; cannot derive GSVA treatment.")
+  stop("No pathways returned by GSVA ranking; cannot derive GSVA treatment.")
 }
 
 selected_pathway_id <- selected_pathway$ID[1]
-selected_pathway_label <- selected_pathway$Description[1]
+selected_pathway_label <- selected_pathway_id
 message(sprintf("Selected pathway for downstream GSVA-based treatment: %s", selected_pathway_label))
 
 selected_gene_set <- bc_terms %>%
@@ -1410,8 +1419,11 @@ print(clinical_sensitivity_tbl)
 # A: In this pipeline, the model fitting approach involves several key components and steps to analyze the relationship between gene expression data and breast cancer tumor stages. The main steps include: 
 # 1. Data Preprocessing: The gene expression data is preprocessed using z-score normalization to standardize the expression levels across samples. This step ensures that the data is on a comparable scale for downstream analyses.
 # 2. Differential Expression Analysis: The limma-voom method is employed to identify differentially expressed genes (DEGs) between early and late tumor stages. Genes are filtered based on expression levels, and statistical tests are performed to determine significant DEGs.
-# 3. Gene Set Enrichment Analysis (GSEA): The identified DEGs are subjected to GSEA using the clusterProfiler package. This step helps to identify biological pathways that are enriched in the DEGs, providing insights into the underlying biological processes associated with tumor stages.
-# 4. Pathway Activity Scoring: The GSVA (Gene Set Variation Analysis) method is used to compute pathway activity scores for each sample based on the selected gene sets from GSEA. This step quantifies the activity of specific pathways in each sample.
+# 3. GSVA-driven pathway ranking: GSVA scores are computed for MSigDB gene sets using GSVA's built-in ranking,
+#    and pathways are ranked by the GSVA score contrast between tumor stages.
+# 4. Pathway Activity Scoring: The GSVA method is used to compute pathway activity scores for each sample based
+#    on the selected pathway from the GSVA ranking. This step quantifies the activity of specific pathways
+#    associated with tumor stages.
 # 5. Covariate Assembly: Clinical and genomic covariates are assembled alongside the pathway activity scores. This includes variables such as age, tumor size, hormone receptor status, mutation burden, and methylation levels.
 # 6. Doubly Robust Estimation: The DML (Doubly Machine Learning) approach is applied to estimate the causal effect of pathway activity on tumor stage while adjusting for covariates. Different machine learning models (e.g., GLMNET, Random Forest, BART) are used as nuisance learners to model the outcome and treatment. 
 # 7. Sensitivity Analysis: A sensitivity analysis is conducted by removing genomic covariates and re-estimating the treatment effect using only clinical covariates. This step assesses the robustness of the findings to different sets of covariates. 
@@ -1425,7 +1437,6 @@ print(clinical_sensitivity_tbl)
 # The splitting is typically done randomly while ensuring that the distribution of key variables (e.g., tumor stage) is maintained across the subsets. Each subset is used for specific purposes in the analysis pipeline, allowing for robust model training, validation, and testing to ensure reliable and generalizable results. All models fitted adopt cross-fitting to mitigate overfitting and enhance causal effect estimation. Stratified folds are created based on the binary tumor stage outcome to ensure balanced representation in each fold during cross-validation. This approach helps to ensure that the models are trained and evaluated on diverse subsets of the data, leading to more robust and reliable findings.
 # 4. Reporting and Interpretation: The results from each split are reported separately, allowing for a comprehensive understanding of the model's performance and the estimated treatment effects across different data subsets. This approach provides insights into the generalizability of the findings and helps to identify any potential discrepancies between the splits.
 # 5. Exploratory Full-Data Fit: An additional exploratory analysis is conducted by pooling all data (train, validation, and test) to fit the models and estimate treatment effects. This pooled analysis is clearly labeled as exploratory since it does not maintain an untouched test set for confirmatory claims. The results from this full-data fit provide additional insights but should be interpreted with caution due to the lack of a separate test set.
-
 
 
 
