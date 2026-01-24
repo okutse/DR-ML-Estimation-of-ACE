@@ -32,6 +32,7 @@ library(parallel)     # parallel computing
 library(doParallel)   # parallel backend for foreach
 library(foreach)      # parallel loops
 library(boot)        # for inverse logit function
+library(ggvenn)      # for Venn diagrams)
 
 library(clusterProfiler) # for GSEA
 library(org.Hs.eg.db)    # for GSEA gene annotation
@@ -49,7 +50,6 @@ library(pROC)          # AUC computation
 # install the limma package using BiocManager
 # BiocManager::install("limma")
 library(limma)       # for DEG analysis
-# library(edgeR)       # for DEG analysis on NB counts
 library(matrixStats) # for simple matrix operations
 library(VennDiagram)  # for Venn diagrams
 library(glmnet)       # high-dimensional regression
@@ -291,7 +291,7 @@ dml_partial_linear <- function(Y, D, X, outcome_learner, treatment_learner, K = 
   list(
     theta = theta_hat,
     se = se_hat,
-    ci = c(theta_hat - 1.96 * se_hat, theta_hat + 1.96 * se_hat),
+    ci = c(theta_hat - 1.645 * se_hat, theta_hat + 1.645 * se_hat),
     folds = folds
   )
 }
@@ -343,8 +343,8 @@ bart_dml_partial <- function(Y, D, X, split_label, K = 5, seed = 202501,
     model = "DR-BART",
     theta = theta_hat,
     se = se_hat,
-    ci_lower = theta_hat - 1.96 * se_hat,
-    ci_upper = theta_hat + 1.96 * se_hat
+    ci_lower = theta_hat - 1.645 * se_hat,
+    ci_upper = theta_hat + 1.645 * se_hat
   )
 }
 
@@ -382,8 +382,8 @@ cs <- cs %>% dplyr::mutate(`HER2 Status` = dplyr::na_if(`HER2 Status`, "")) %>%
               tmb_nonsynonymous = `TMB (nonsynonymous)`) %>% 
   # add binarized tumor stage from levels levels(as.factor(cs$`Tumor Stage`)) "0" "1" "2" "3" "4"
   dplyr::mutate(tumor_stage = as.factor(case_when(
-    str_detect(tumor_stg, "0|1|2")  ~ "early",
-    str_detect(tumor_stg, "3|4") ~ "late",
+    str_detect(tumor_stg, "0|1")  ~ "early",
+    str_detect(tumor_stg, "2|3|4") ~ "late",
     TRUE ~ NA_character_
   ))) %>% 
   # add observability mask for tumor stage (1 = observed, 0 = missing) to address missing outcome data
@@ -522,12 +522,19 @@ exp_mat <- exp_mat[ , common_samples, drop = FALSE]
 dt2 <- dt %>%
   dplyr::filter(patient_id %in% common_samples) %>%
   dplyr::arrange(match(patient_id, colnames(exp_mat)))
-
+# Keep tumor_stage (required for stratification) and don't drop other clinical columns yet
+dt2 <- dt2[!is.na(dt2$tumor_stage), ] # filter to non-missing tumor stage
+cat("dt2 after filtering to non-missing tumor stage: ", nrow(dt2), " rows\n")
+cat("dt2 columns:", paste(colnames(dt2), collapse=", "), "\n")
+exp_mat <- exp_mat[, dt2$patient_id, drop = FALSE] # keep only subjects with observed tumor stage to align ids
 grp <- factor(dt2$tumor_stage, levels = c("early", "late")) # early = 1338; late = 128; n = 1466 samples
 table(grp)
 
 # check whether exp_mat are already normalized log2 (range is 0 to 16)
 summary(as.numeric(exp_mat))
+
+# omit all NA in exp_mat if any after median imputation
+exp_mat <- exp_mat[complete.cases(exp_mat), , drop = FALSE]
 
 # Pre-processing steps for mRNA expression data
 ## Train, val, test split before preprocessing using stratification by tumor stage
@@ -573,48 +580,51 @@ collapse_duplicate_genes <- function(mat) {
   mat
 }
 
+# Split the expression matrix
 train_mat_raw <- exp_mat[, train_ids, drop = FALSE]
 val_mat_raw <- exp_mat[, val_ids, drop = FALSE]
 test_mat_raw <- exp_mat[, test_ids, drop = FALSE]
 
-
-
 ## Preprocess
-qn_reference <- compute_qn_reference(train_mat_raw)
-train_qn <- apply_qn(train_mat_raw, qn_reference)
-val_qn <- apply_qn(val_mat_raw, qn_reference)
-test_qn <- apply_qn(test_mat_raw, qn_reference)
-
-train_log2 <- safe_log2(train_qn)
-val_log2 <- safe_log2(val_qn)
-test_log2 <- safe_log2(test_qn)
-
-train_log2 <- collapse_duplicate_genes(train_log2)
-val_log2 <- collapse_duplicate_genes(val_log2)
-test_log2 <- collapse_duplicate_genes(test_log2)
-
-gene_means <- rowMeans(train_log2, na.rm = TRUE)
-gene_sds <- apply(train_log2, 1, sd, na.rm = TRUE)
-gene_sds[is.na(gene_sds) | gene_sds == 0] <- 1  # guard against zero variance
+# qn_reference <- compute_qn_reference(train_mat_raw)
+# train_qn <- apply_qn(train_mat_raw, qn_reference)
+# val_qn <- apply_qn(val_mat_raw, qn_reference)
+# test_qn <- apply_qn(test_mat_raw, qn_reference)
+# 
+# train_log2 <- safe_log2(train_qn)
+# val_log2 <- safe_log2(val_qn)
+# test_log2 <- safe_log2(test_qn)
+# 
+# train_log2 <- collapse_duplicate_genes(train_log2)
+# val_log2 <- collapse_duplicate_genes(val_log2)
+# test_log2 <- collapse_duplicate_genes(test_log2)
+# 
+# gene_means <- rowMeans(train_log2, na.rm = TRUE)
+# gene_sds <- apply(train_log2, 1, sd, na.rm = TRUE)
+# gene_sds[is.na(gene_sds) | gene_sds == 0] <- 1  # guard against zero variance
 
 #expr_train <- zscore_with_stats(train_log2, gene_means, gene_sds)
 #expr_val <- zscore_with_stats(val_log2, gene_means, gene_sds)
 #expr_test <- zscore_with_stats(test_log2, gene_means, gene_sds)
 
 
-expr_train <- train_log2
-expr_val <- val_log2
-expr_test <- test_log2
+# expr_train <- train_log2
+# expr_val <- val_log2
+# expr_test <- test_log2
 
+expr_train = collapse_duplicate_genes(train_mat_raw)
+expr_val = collapse_duplicate_genes(val_mat_raw)
+expr_test = collapse_duplicate_genes(test_mat_raw)
 
 expr_splits <- list(
   train = expr_train,
   val = expr_val,
   test = expr_test,
   split_ids = list(train = train_ids, val = val_ids, test = test_ids),
-  stats = list(qn_reference = qn_reference, means = gene_means, sds = gene_sds)
+  stats = list() # list(qn_reference = qn_reference, means = gene_means, sds = gene_sds)
 )
 
+# Align clinical data splits with expression data splits
 clinical_splits <- lapply(expr_splits$split_ids, function(ids) align_clinical_split(dt2, ids))
 stopifnot(
   identical(colnames(expr_splits$train), clinical_splits$train$patient_id),
@@ -630,23 +640,23 @@ train_plot_df <- data.frame(
 ) %>%
   dplyr::filter(!is.na(value))
 
-p_train_raw <- train_plot_df %>%
-  dplyr::filter(state == "Raw") %>%
-  ggplot2::ggplot(ggplot2::aes(x = value)) +
-  ggplot2::geom_density(fill = "#F8766D", alpha = 0.6) +
-  ggplot2::labs(title = "Train distribution before preprocessing",
-                x = "Expression", y = "Density") +
-  ggplot2::theme_minimal()
-
-p_train_processed <- train_plot_df %>%
-  dplyr::filter(state != "Raw") %>%
-  ggplot2::ggplot(ggplot2::aes(x = value)) +
-  ggplot2::geom_density(fill = "#00BFC4", alpha = 0.6) +
-  ggplot2::labs(title = "Train distribution after preprocessing",
-                x = "Z-score", y = "Density") +
-  ggplot2::theme_minimal()
-
-train_preprocessing_check <- cowplot::plot_grid(p_train_raw, p_train_processed, ncol = 2)
+# p_train_raw <- train_plot_df %>%
+#   dplyr::filter(state == "Raw") %>%
+#   ggplot2::ggplot(ggplot2::aes(x = value)) +
+#   ggplot2::geom_density(fill = "#F8766D", alpha = 0.6) +
+#   ggplot2::labs(title = "Train distribution before preprocessing",
+#                 x = "Expression", y = "Density") +
+#   ggplot2::theme_minimal()
+# 
+# p_train_processed <- train_plot_df %>%
+#   dplyr::filter(state != "Raw") %>%
+#   ggplot2::ggplot(ggplot2::aes(x = value)) +
+#   ggplot2::geom_density(fill = "#00BFC4", alpha = 0.6) +
+#   ggplot2::labs(title = "Train distribution after preprocessing",
+#                 x = "Z-score", y = "Density") +
+#   ggplot2::theme_minimal()
+# 
+# train_preprocessing_check <- cowplot::plot_grid(p_train_raw, p_train_processed, ncol = 2)
 
 #################################################################################
 ## DEG identification using limma-voom and edgeR on training set only
@@ -668,112 +678,159 @@ fit <- limma::lmFit(expr_filt, design)
 fit <- limma::eBayes(fit)
 fit$genes <- data.frame(gene = rownames(expr_filt))
 
-## limma results: late vs early [add p-value adjustment p.adjust, method = "BH"]
-res_limma <- limma::topTable(fit, coef = "grp_trainlate", number = Inf) %>%
+# limma results: Late vs Early 
+res_limma <- limma::topTable(
+  fit,
+  coef = "grp_trainlate",
+  number = Inf,
+  adjust.method = "BH"
+) %>%
   as.data.frame()
 
+# argument on cutoff selection. note the small estimated effects overall. The middle 50% of logFC is roughly 
+# [−0.024, 0.027], and the most extreme values are only about −0.95 to +1.01
+summary(res_limma)
 
-## select top up and down regulated genes in late stage breast cancer
-deg_limma <- res_limma %>%
-  dplyr::mutate(direction = ifelse(logFC > 0, "up", "down"))
-
-deg_limma_selected <- deg_limma %>%
-  dplyr::filter(adj.P.Val < 0.05, abs(logFC) >= 1) %>%
-  dplyr::arrange(adj.P.Val)
-
-if (nrow(deg_limma_selected) == 0) {
-  warning("No DEGs passed adj.P.Val < 0.05 and |logFC| >= 1; using top 50 genes by adjusted p-value instead.")
-  deg_limma_selected <- deg_limma %>%
-    dplyr::arrange(adj.P.Val) #%>%
-    #dplyr::slice_head(n = 50)
-}
-
-deg_genes_limma <- deg_limma_selected$gene
-deg_genes <- deg_genes_limma  
-length(deg_genes)
-
-# create latex table of DEGs from limma results (top 10)
-deg_tbl_up <- deg_limma_selected %>%
-  dplyr::filter(direction == "up") %>%
-  dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
-  head(10)
-
-deg_tbl_down <- deg_limma_selected %>%
-  dplyr::filter(direction == "down") %>%
-  dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
-  tail(10)
-
-deg_tbl <- rbind(deg_tbl_up, deg_tbl_down)
-knitr::kable(deg_tbl, format = "latex", booktabs = TRUE, digits = 4,
-      caption = "Top 10 Upregulated and Downregulated DEGs identified by limma-voom method")
-
-# Volcano plot for limma results [improve this later]
-volcano_data <- res_limma %>%
-  dplyr::mutate(
-    significant = case_when(
-      adj.P.Val < 0.05 & logFC >  1 ~ "Upregulated",
-      adj.P.Val < 0.05 & logFC < -1 ~ "Downregulated",
-      TRUE                          ~ "Not significant"
-    ),
-    neglog10_adjP = -log10(adj.P.Val)
-  )
-
-## genes to label for every class
-## Up/Down: label top N by abs logFC
-## Not significant: label top N by "volcano extremeness" (high -log10(p) AND large abs(logFC))
-top_n_sig  <- 10
+# thresholds
+alpha_fdr <- 0.10 # conservative for exploratory analysis
+lfc_cut   <- 0.2          # ~1.15-fold
+top_n_sig <- 10
 top_n_nsig <- 10
 
-label_data <- bind_rows(
-  volcano_data %>%
-    dplyr::filter(significant %in% c("Upregulated", "Downregulated")) %>%
-    dplyr::arrange(desc(abs(logFC))) %>%
-    dplyr::group_by(significant) %>%
-    dplyr::slice_head(n = top_n_sig) %>%
-    dplyr::ungroup(),
-  
-  volcano_data %>%
-    dplyr::filter(significant == "Not significant") %>%
-    dplyr::mutate(extremeness = neglog10_adjP * abs(logFC)) %>%  # simple, stable ranking
-    dplyr::arrange(desc(extremeness)) %>%
-    dplyr::slice_head(n = top_n_nsig)
+# pull rownames in as gene IDs
+if (!"gene" %in% colnames(res_limma)) {
+  res_limma <- res_limma %>% tibble::rownames_to_column("gene")
+}
+
+# annotate direction + DEG class on the same dataset
+res_annot <- res_limma %>%
+  mutate(
+    neglog10_adjP = -log10(adj.P.Val),
+    direction = case_when(
+      logFC >=  lfc_cut ~ "Up",
+      logFC <= -lfc_cut ~ "Down",
+      TRUE              ~ "None"
+    ),
+    deg_class = case_when(
+      adj.P.Val < alpha_fdr & logFC >=  lfc_cut ~ "Upregulated",
+      adj.P.Val < alpha_fdr & logFC <= -lfc_cut ~ "Downregulated",
+      TRUE                                  ~ "Not significant"
+    )
+  )
+
+# select DEGs for downstream (GSVA / pathway enrichment / causal) 
+deg_limma_selected <- res_annot %>%
+  filter(adj.P.Val < alpha_fdr, abs(logFC) >= lfc_cut) %>%
+  arrange(adj.P.Val)
+
+if (!nrow(deg_limma_selected)) {
+  warning("No DEGs passed the specified FDR/logFC thresholds; using top 50 genes by adjusted p-value as a fallback.")
+  deg_limma_selected <- res_annot %>%
+    arrange(adj.P.Val) %>%
+    slice_head(n = 50)
+}
+
+deg_genes <- deg_limma_selected$gene
+length(deg_genes)
+
+# Separate up vs down gene sets (useful for enrichment or signed analyses)
+deg_genes_up   <- deg_limma_selected %>% filter(logFC >=  lfc_cut) %>% pull(gene)
+deg_genes_down <- deg_limma_selected %>% filter(logFC <= -lfc_cut) %>% pull(gene)
+
+# Table of up and down regulated DEGs
+deg_tbl_up <- deg_limma_selected %>%
+  filter(deg_class == "Upregulated") %>%
+  arrange(adj.P.Val, desc(logFC)) %>%
+  dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
+  slice_head(n = 10)
+
+deg_tbl_down <- deg_limma_selected %>%
+  filter(deg_class == "Downregulated") %>%
+  arrange(adj.P.Val, logFC) %>%   # most negative first
+  dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
+  slice_head(n = 10)
+
+deg_tbl <- bind_rows(deg_tbl_up, deg_tbl_down)
+
+knitr::kable(
+  deg_tbl,
+  format = "latex",
+  booktabs = TRUE,
+  digits = 4,
+  caption = "Top Upregulated and Downregulated DEGs identified by limma"
 )
 
-volcano_plot <- ggplot2::ggplot(volcano_data, aes(x = logFC, y = neglog10_adjP, color = significant)) +
-  geom_point(alpha = 0.6) +
-  geom_text_repel(
+# Volcano plot with correct coloring for up, down, and non-sig genes with labels
+volcano_data <- res_annot
+# Label selection:
+# For Up/Down: top N by abs(logFC)
+# For Not significant: top N by a stable "extremeness" score
+label_data <- bind_rows(
+  volcano_data %>%
+    filter(deg_class %in% c("Upregulated", "Downregulated")) %>%
+    arrange(desc(abs(logFC))) %>%
+    group_by(deg_class) %>%
+    slice_head(n = top_n_sig) %>%
+    ungroup(),
+  volcano_data %>%
+    filter(deg_class == "Not significant") %>%
+    mutate(extremeness = neglog10_adjP * abs(logFC)) %>%
+    arrange(desc(extremeness)) %>%
+    slice_head(n = top_n_nsig)
+)
+volcano_data$deg_class <- factor(
+  volcano_data$deg_class,
+  levels = c("Upregulated", "Downregulated", "Not significant")
+)
+
+volcano_plot <- ggplot(volcano_data, aes(x = logFC, y = neglog10_adjP, color = as.factor(deg_class))) +
+  geom_point(alpha = 0.6, size = 1.2) +
+  geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", linewidth = 0.4) +
+  geom_hline(yintercept = -log10(alpha_fdr), linetype = "dashed", linewidth = 0.4) +
+  ggrepel::geom_text_repel(
     data = label_data,
     aes(label = gene),
     size = 3,
     max.overlaps = Inf,
     box.padding = 0.3,
     point.padding = 0.2,
-    segment.color = "#969696"
+    segment.alpha = 0.6
   ) +
   scale_color_manual(values = c(
     "Upregulated"     = "red",
     "Downregulated"   = "blue",
-    "Not significant" = "gray"
+    "Not significant" = "black"
   )) +
   labs(
-    title = "Volcano plot of DEGs (limma)",
-    x = "Log2 Fold Change (Late vs Early)",
-    y = "-Log10 Adjusted P-Value",
+    title = "(a)", #Volcano plot of DEGs in late vs early breast cancer tumor stages
+    x = "log2 Fold Change (Late vs Early)",
+    y = "-log10(FDR)",
     color = "DEG class"
   ) +
-  theme_minimal()
-volcano_plot
+  theme_nature()
 
-# need to do sensitivity analysis with edgeR as well
-top_genes <- c(deg_tbl_up$gene, deg_tbl_down$gene)
-top_genes <- top_genes[top_genes %in% rownames(expr_splits$train)]
+volcano_plot
+# save the 600 dpi image in results folder
+ggsave(
+  filename = "results/[a]limma_deg_volcano_plot.png",
+  plot = volcano_plot,
+  width = 6,
+  height = 5,
+  dpi = 600
+)
+
+# Top DEG genes for downstream analyses (fallback to overall top-ranked genes if up/down tables are empty)
+top_gene_candidates <- unique(c(deg_tbl_up$gene, deg_tbl_down$gene))
+if (!length(top_gene_candidates)) {
+  top_gene_candidates <- deg_limma_selected %>%
+    arrange(adj.P.Val) %>%
+    pull(gene)
+}
+top_genes <- top_gene_candidates[top_gene_candidates %in% rownames(expr_splits$train)]
 
 if (!length(top_genes)) {
   stop("No DEG genes overlap with expression matrix after filtering; cannot proceed to downstream analyses.")
 }
-
-
-# Downstream analysis data
 
 ## Expression of top DEGs
 exp_top <- expr_splits$train[top_genes, dt_train$patient_id, drop = FALSE]
@@ -786,19 +843,27 @@ exp_top_df <- as.data.frame(t(exp_top)) %>%
 boxplot_top_degs <- ggplot(exp_top_df, aes(x = tumor_stage, y = expression, fill = tumor_stage)) +
   geom_boxplot() +
   facet_wrap(~ gene, scales = "free_y") +
-  labs(title = "Expression of Top DEGs by Tumor Stage",
+  labs(title = "(b)", # Expression of top DEGs by breast cancer tumor stage [not strictly necessary except to show distributions]
        x = "Tumor Stage",
-       y = "Expression (Z-score)") +
-  theme_minimal() +
-  theme(legend.position = "none")
+       y = "Expression scores") +
+  theme(legend.position = "none")+
+  theme_nature()
 boxplot_top_degs
-
+# save the 600 dpi image in results folder
+ggsave(boxplot_top_degs,
+       filename = "results/[b]top_degs_boxplot.png",
+       width = 8,
+       height = 6,
+       dpi = 600
+)
 
 #################################################################################
 # Gene set enrichment analysis ----
 ################################################################################
+# In this section, we perform GSEA using clusterProfiler on the limma results. Specifically, we (1) TO DO: confirm that the we use the genes found to be significantly differentially expressed between the cancer stages
 
-# Using clusterProfiler for GSEA
+
+# Using clusterProfiler for GSEA 
 gene_ranks <- res_limma$logFC
 names(gene_ranks) <- res_limma$gene
 gene_ranks <- gene_ranks[!is.na(names(gene_ranks))]
@@ -806,10 +871,11 @@ gene_ranks <- gene_ranks[!duplicated(names(gene_ranks))]
 gene_ranks <- sort(gene_ranks, decreasing = TRUE)
 
 # Curate breast cancer relevant gene sets from MSigDB (C2:CGP). Fallback to Hallmark if empty.
+# retrieve gene sets and their member genes from the human genome collections using the molecular signatures database (MSigDB) curated gene set canonical pathways (C2:CGP) related to breast cancer.
 bc_terms <- msigdbr::msigdbr(
-  species = "Homo sapiens",
-  category = "C2",
-  subcategory = "CGP"
+  species = "Homo sapiens", 
+  collection = "C2",
+  subcollection = "CP" # canonical pathways: 
 ) %>%
   dplyr::filter(stringr::str_detect(gs_name, "BREAST|MAMMARY|BRCA|ERBB2|HER2|ESTROGEN|LUMINAL|BASAL", negate = FALSE)) %>%
   dplyr::select(gs_name, gene_symbol) %>%
@@ -822,12 +888,14 @@ if (!nrow(bc_terms)) {
     dplyr::distinct()
 }
 
+# use clusterProfiler for GSEA 
 bc_gsea <- clusterProfiler::GSEA(
   geneList = gene_ranks,
   TERM2GENE = bc_terms,
   minGSSize = 10,
   maxGSSize = 500,
-  pvalueCutoff = 0.25,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05, # need to change this
   verbose = FALSE
 )
 
@@ -896,7 +964,35 @@ if (length(selected_gene_set) < 10) {
 
 pathway_gene_sets <- list(selected_pathway_id = selected_gene_set)
 
+# check which of the top DEGs are in the selected pathway and plot them
+# deg_in_pathway <- deg_limma_selected %>%
+#   dplyr::filter(gene %in% selected_gene_set) %>%
+#   dplyr::arrange(adj.P.Val)
+# print("DEGs in selected pathway:")
+# print(deg_in_pathway)
+# 
+# # plot the intersection of top DEGs and selected pathway genes using venn diagram
+# venn_data <- list(
+#   DEGs = deg_limma_selected$gene,
+#   Selected_Pathway = selected_gene_set
+# )
+# 
+# venn_plot <- ggvenn::ggvenn(
+#   venn_data,
+#   c("DEGs", "Selected_Pathway"),
+#   fill_color = c("#D55E00", "#0072B2"),
+#   stroke_size = 0.5,
+#   set_name_size = 4
+# ) +
+#   labs(
+#     title = "Overlap between DEGs and selected pathway genes",
+#     subtitle = sprintf("Pathway: %s", selected_pathway_label)
+#   ) +
+#   theme_nature()
+# venn_plot
 
+
+  
 #################################################################################
 # Pathway activity scoring (GSVA) and covariate assembly ----
 ################################################################################
@@ -952,6 +1048,8 @@ nonsynonymous_classes <- c(
   "Translation_Start_Site", "In_Frame_Del", "In_Frame_Ins"
 )
 
+
+# prepare mutation and methylation summary statistics for downstream analyses
 mutation_summary <- mt %>%
   dplyr::mutate(
     patient_id = Tumor_Sample_Barcode,
@@ -1305,6 +1403,29 @@ clinical_sensitivity_tbl <- dplyr::tibble(
 )
 print("Sensitivity (clinical-only covariates) DR estimates:")
 print(clinical_sensitivity_tbl)
+
+
+#################################################################################
+# Q: Describe the model fitting approach described in this pipeline. What are the key components and steps involved in the analysis?
+# A: In this pipeline, the model fitting approach involves several key components and steps to analyze the relationship between gene expression data and breast cancer tumor stages. The main steps include: 
+# 1. Data Preprocessing: The gene expression data is preprocessed using z-score normalization to standardize the expression levels across samples. This step ensures that the data is on a comparable scale for downstream analyses.
+# 2. Differential Expression Analysis: The limma-voom method is employed to identify differentially expressed genes (DEGs) between early and late tumor stages. Genes are filtered based on expression levels, and statistical tests are performed to determine significant DEGs.
+# 3. Gene Set Enrichment Analysis (GSEA): The identified DEGs are subjected to GSEA using the clusterProfiler package. This step helps to identify biological pathways that are enriched in the DEGs, providing insights into the underlying biological processes associated with tumor stages.
+# 4. Pathway Activity Scoring: The GSVA (Gene Set Variation Analysis) method is used to compute pathway activity scores for each sample based on the selected gene sets from GSEA. This step quantifies the activity of specific pathways in each sample.
+# 5. Covariate Assembly: Clinical and genomic covariates are assembled alongside the pathway activity scores. This includes variables such as age, tumor size, hormone receptor status, mutation burden, and methylation levels.
+# 6. Doubly Robust Estimation: The DML (Doubly Machine Learning) approach is applied to estimate the causal effect of pathway activity on tumor stage while adjusting for covariates. Different machine learning models (e.g., GLMNET, Random Forest, BART) are used as nuisance learners to model the outcome and treatment. 
+# 7. Sensitivity Analysis: A sensitivity analysis is conducted by removing genomic covariates and re-estimating the treatment effect using only clinical covariates. This step assesses the robustness of the findings to different sets of covariates. 
+# Overall, the pipeline integrates statistical modeling, machine learning, and biological interpretation to investigate the relationship between gene expression, pathway activity, and breast cancer tumor stages.
+
+# Explain the data splitting strategy used in this analysis. How are the training, validation, and test sets defined and utilized?
+# A: The data splitting strategy in this analysis involves dividing the dataset into three distinct subsets: training, validation, and test sets.
+# 1. Training Set: The training set is used to fit the models and estimate the parameters. It includes a portion of the data that is representative of the overall dataset. The training set is utilized for tasks such as differential expression analysis, fitting machine learning models for outcome and treatment, and estimating the causal effects using the DML approach.
+# 2. Validation Set: The validation set is used to tune model hyperparameters and select the best-performing models. It serves as an intermediate evaluation step to prevent overfitting to the training data. The validation set is employed to assess the performance of different models (e.g., GLM NET, Random Forest) and select the optimal model based on metrics such as AUC and concordance index. 
+# 3. Test Set: The test set is reserved for the final evaluation of the selected models. It is not used during the model fitting or selection process, ensuring an unbiased assessment of model performance. The test set is utilized to compute predictive performance metrics (AUC and concordance index) for the final models and to report the doubly robust estimates of the treatment effect on tumor stage. 
+# The splitting is typically done randomly while ensuring that the distribution of key variables (e.g., tumor stage) is maintained across the subsets. Each subset is used for specific purposes in the analysis pipeline, allowing for robust model training, validation, and testing to ensure reliable and generalizable results. All models fitted adopt cross-fitting to mitigate overfitting and enhance causal effect estimation. Stratified folds are created based on the binary tumor stage outcome to ensure balanced representation in each fold during cross-validation. This approach helps to ensure that the models are trained and evaluated on diverse subsets of the data, leading to more robust and reliable findings.
+# 4. Reporting and Interpretation: The results from each split are reported separately, allowing for a comprehensive understanding of the model's performance and the estimated treatment effects across different data subsets. This approach provides insights into the generalizability of the findings and helps to identify any potential discrepancies between the splits.
+# 5. Exploratory Full-Data Fit: An additional exploratory analysis is conducted by pooling all data (train, validation, and test) to fit the models and estimate treatment effects. This pooled analysis is clearly labeled as exploratory since it does not maintain an untouched test set for confirmatory claims. The results from this full-data fit provide additional insights but should be interpreted with caution due to the lack of a separate test set.
+
 
 
 
