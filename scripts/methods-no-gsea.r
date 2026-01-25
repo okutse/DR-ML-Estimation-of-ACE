@@ -1704,6 +1704,25 @@ print("Doubly robust estimates when pooling train/val/test (exploratory full-dat
 print(dml_full_tbl)
 # Best practice: Clearly label pooled fits as exploratory because no holdout remains—regulators expect confirmatory claims to rely on untouched test data.
 
+causal_effects_summary <- dplyr::bind_rows(dml_split_tbl, dml_full_tbl) %>%
+  dplyr::mutate(
+    sd = se,
+    effect_minus_sd = theta - sd,
+    effect_plus_sd = theta + sd
+  ) %>%
+  dplyr::arrange(split, model)
+
+print("Causal effect summary (theta ± sd) by split and model:")
+print(causal_effects_summary %>%
+        dplyr::select(split, model, theta, sd, effect_minus_sd, effect_plus_sd, ci_lower, ci_upper))
+
+effects_dir <- file.path("results", "5-fold-results")
+dir.create(effects_dir, recursive = TRUE, showWarnings = FALSE)
+write.csv(causal_effects_summary,
+          file.path(effects_dir, "causal_effects_summary.csv"),
+          row.names = FALSE)
+cat("Saved: Causal effect summary CSV\n")
+
 dr_effects_tbl <- dml_split_tbl %>% dplyr::filter(split == "train")
 
 create_stratified_folds <- function(y, k = 5, seed = 202501) {
