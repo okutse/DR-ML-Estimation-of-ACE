@@ -1,13 +1,13 @@
-# Title: Doubly-robust machine learning estimation of the average causal effect of (selected) DEGs on breast cancer stage and survival outcomes
+# Title: Doubly-robust machine learning estimation of the average causal effect of (selected) DEGs on breast cancer survival outcomes
 # Author: Amos Okutse, Man-Fang Liang
 # Date: Jan 2025
 
 
-# Comparative Methods:
-#(1) DR Penalized Logistic Regression
-#(2) DR Random Forest
-#(3) DR BART
-#(4) DR Logistic regression on categorized DEGs (low, mid, high expression levels based on quantiles)
+# Comparative Methods for Survival Analysis:
+# (1) DR-Cox: Cox proportional hazards model for outcome prediction
+# (2) DR-RSF: Random Survival Forest for outcome prediction  
+# (3) DR-DeepSurv: Deep learning survival model for outcome prediction [COMMENTED OUT - keras installation issues]
+# (4) DR-GLMNET: Penalized regression on RMST pseudo-outcome (baseline)
 
 ## Load required packages
 required_pkgs <- c("msigdbr", "GSVA", "ranger", "pROC")
@@ -21,35 +21,32 @@ library(dplyr)         # data manipulation
 library(stringr)       # string helpers
 library(survival)      # survival objects
 library(glmnet)        # high-dimensional regression
-library(grf)          # generalized random forests
-library(BART)         # Bayesian Additive Regression Trees
-library(splines)      # natural splines
-library(ggplot2)      # plotting
-library(ggrepel)      # labeling points cleanly
-library(ggpubr)       # arranging plots
-library(cowplot)      # arranging plots
-library(parallel)     # parallel computing
-library(doParallel)   # parallel backend for foreach
-library(foreach)      # parallel loops
-library(boot)        # for inverse logit function
-library(ggvenn)      # for Venn diagrams)
+library(randomForestSRC) # random survival forest
+library(splines)       # natural splines
+library(ggplot2)       # plotting
+library(ggrepel)       # labeling points cleanly
+library(ggpubr)        # arranging plots
+library(cowplot)       # arranging plots
+library(parallel)      # parallel computing
+library(doParallel)    # parallel backend for foreach
+library(foreach)       # parallel loops
+library(boot)          # for inverse logit function
+library(ggvenn)        # for Venn diagrams
 
-library(pathview)         # for KEGG pathway visualization
+library(pathview)      # for KEGG pathway visualization
 library(msigdbr)       # MSigDB gene sets
 library(GSVA)          # pathway activity scoring
 library(ranger)        # fast random forests
 library(pROC)          # AUC computation
+# library(limma)         # for DEG analysis (commented out - DEG section disabled)
+library(matrixStats)   # for simple matrix operations
+library(VennDiagram)   # for Venn diagrams
 
-# install BiocManager if you don't have it (uncomment and run only run once)
-# if (!requireNamespace("BiocManager", quietly = TRUE)) {
-#   install.packages("BiocManager")
+# Optional: keras for DeepSurv (loaded conditionally in deepsurv_learner function)
+# if (!requireNamespace("keras", quietly = TRUE)) {
+#   install.packages("keras")
+#   keras::install_keras()
 # }
-# install the limma package using BiocManager
-# BiocManager::install("limma")
-library(limma)       # for DEG analysis
-library(matrixStats) # for simple matrix operations
-library(VennDiagram)  # for Venn diagrams
-library(glmnet)       # high-dimensional regression
 
 
 # source helper files
@@ -395,171 +392,103 @@ rsf_surv_learner <- function(num.trees = 500) {
   }
 }
 
-#' Multi-Layer Perceptron (MLP) Treatment Learner
-#' 
-#' Uses a simple neural network to predict treatment (pathway score) from covariates.
-#' 
-#' @param hidden_units Vector of hidden layer sizes (default: c(64, 32))
-#' @param epochs Number of training epochs
-#' @param batch_size Batch size for training
-#' @param dropout_rate Dropout rate for regularization
-#' @return Function that takes (X, y) and returns list with model and predict function
-mlp_treatment_learner <- function(hidden_units = c(64, 32), 
-                                  epochs = 50, 
-                                  batch_size = 32,
-                                  dropout_rate = 0.3) {
-  function(X, y) {
-    # Check if keras is available
-    if (!requireNamespace("keras", quietly = TRUE)) {
-      warning("keras not available, falling back to glmnet")
-      return(glmnet_learner(family = "gaussian", alpha = 0.5)(X, y))
-    }
-    
-    library(keras)
-    X_mat <- as.matrix(X)
-    y_vec <- as.numeric(y)
-    
-    # Build MLP model
-    model <- keras_model_sequential()
-    
-    # Input layer
-    model %>% layer_dense(units = hidden_units[1], 
-                         activation = "relu", 
-                         input_shape = ncol(X_mat))
-    
-    # Hidden layers with dropout
-    for (i in seq_along(hidden_units)[-1]) {
-      model %>% 
-        layer_dropout(rate = dropout_rate) %>%
-        layer_dense(units = hidden_units[i], activation = "relu")
-    }
-    
-    # Output layer (regression)
-    model %>% layer_dense(units = 1, activation = "linear")
-    
-    # Compile model
-    model %>% compile(
-      loss = "mse",
-      optimizer = optimizer_adam(learning_rate = 0.001),
-      metrics = c("mae")
-    )
-    
-    # Train model
-    tryCatch({
-      history <- model %>% fit(
-        x = X_mat,
-        y = y_vec,
-        epochs = epochs,
-        batch_size = batch_size,
-        verbose = 0,
-        validation_split = 0.2
-      )
-    }, error = function(e) {
-      warning("MLP training failed: ", e$message)
-    })
-    
-    list(
-      model = model,
-      predict = function(newX) {
-        as.numeric(predict(model, as.matrix(newX)))
-      }
-    )
-  }
-}
-
-#' DeepSurv Learner for RMST Prediction
-#' 
-#' Neural network-based Cox model (DeepSurv) for predicting RMST.
-#' Uses keras to build a neural network with Cox partial likelihood loss.
-#' 
-#' @param hidden_units Vector of hidden layer sizes
-#' @param epochs Number of training epochs
-#' @param batch_size Batch size for training
-#' @param dropout_rate Dropout rate
-#' @return Function that takes (X, time, event, tau) and returns list with model and predict function
-deepsurv_learner <- function(hidden_units = c(64, 32),
-                             epochs = 50,
-                             batch_size = 32,
-                             dropout_rate = 0.3) {
-  function(X, time, event, tau) {
-    
-    # Check if keras is available
-    if (!requireNamespace("keras", quietly = TRUE)) {
-      warning("keras not available, falling back to Cox model")
-      return(cox_surv_learner()(X, time, event, tau))
-    }
-    
-    library(keras)
-    library(survival)
-    
-    X_mat <- as.matrix(X)
-    n <- nrow(X_mat)
-    
-    # Simplified DeepSurv: Train neural network to predict RMST directly
-    # (true DeepSurv would use Cox partial likelihood, but that requires custom loss)
-    # For simplicity, we compute pseudo-outcome and train on it
-    
-    # Compute pseudo-outcome for training
-    G_t <- compute_censoring_weights(time = time, event = event, method = "KM")
-    Y_pseudo_train <- compute_rmst_pseudo(
-      time = time, 
-      event = event, 
-      G_t = G_t, 
-      tau = tau,
-      trim_quantile = 0.95
-    )
-    
-    # Build neural network
-    model <- keras_model_sequential()
-    
-    model %>% layer_dense(units = hidden_units[1], 
-                         activation = "relu", 
-                         input_shape = ncol(X_mat))
-    
-    for (i in seq_along(hidden_units)[-1]) {
-      model %>% 
-        layer_dropout(rate = dropout_rate) %>%
-        layer_dense(units = hidden_units[i], activation = "relu")
-    }
-    
-    model %>% layer_dense(units = 1, activation = "linear")
-    
-    model %>% compile(
-      loss = "mse",
-      optimizer = optimizer_adam(learning_rate = 0.001),
-      metrics = c("mae")
-    )
-    
-    # Train
-    tryCatch({
-      history <- model %>% fit(
-        x = X_mat,
-        y = Y_pseudo_train,
-        epochs = epochs,
-        batch_size = batch_size,
-        verbose = 0,
-        validation_split = 0.2
-      )
-      
-      success <- TRUE
-    }, error = function(e) {
-      warning("DeepSurv training failed: ", e$message)
-      success <<- FALSE
-    })
-    
-    if (!exists("success") || !success) {
-      # Fallback to Cox
-      return(cox_surv_learner()(X, time, event, tau))
-    }
-    
-    list(
-      model = model,
-      predict = function(newX) {
-        as.numeric(predict(model, as.matrix(newX)))
-      }
-    )
-  }
-}
+# ============================================================================
+# DeepSurv Learner - COMMENTED OUT (keras installation issues)
+# ============================================================================
+# #' DeepSurv Learner for RMST Prediction
+# #' 
+# #' Neural network-based Cox model (DeepSurv) for predicting RMST.
+# #' Uses keras to build a neural network with Cox partial likelihood loss.
+# #' 
+# #' @param hidden_units Vector of hidden layer sizes
+# #' @param epochs Number of training epochs
+# #' @param batch_size Batch size for training
+# #' @param dropout_rate Dropout rate
+# #' @return Function that takes (X, time, event, tau) and returns list with model and predict function
+# deepsurv_learner <- function(hidden_units = c(64, 32),
+#                              epochs = 50,
+#                              batch_size = 32,
+#                              dropout_rate = 0.3) {
+#   function(X, time, event, tau) {
+#     
+#     # Check if keras is available
+#     if (!requireNamespace("keras", quietly = TRUE)) {
+#       warning("keras not available, falling back to Cox model")
+#       return(cox_surv_learner()(X, time, event, tau))
+#     }
+#     
+#     library(keras)
+#     library(survival)
+#     
+#     X_mat <- as.matrix(X)
+#     n <- nrow(X_mat)
+#     
+#     # Simplified DeepSurv: Train neural network to predict RMST directly
+#     # (true DeepSurv would use Cox partial likelihood, but that requires custom loss)
+#     # For simplicity, we compute pseudo-outcome and train on it
+#     
+#     # Compute pseudo-outcome for training
+#     G_t <- compute_censoring_weights(time = time, event = event, method = "KM")
+#     Y_pseudo_train <- compute_rmst_pseudo(
+#       time = time, 
+#       event = event, 
+#       G_t = G_t, 
+#       tau = tau,
+#       trim_quantile = 0.95
+#     )
+#     
+#     # Build neural network
+#     model <- keras_model_sequential()
+#     
+#     model %>% layer_dense(units = hidden_units[1], 
+#                          activation = "relu", 
+#                          input_shape = ncol(X_mat))
+#     
+#     for (i in seq_along(hidden_units)[-1]) {
+#       model %>% 
+#         layer_dropout(rate = dropout_rate) %>%
+#         layer_dense(units = hidden_units[i], activation = "relu")
+#     }
+#     
+#     model %>% layer_dense(units = 1, activation = "linear")
+#     
+#     model %>% compile(
+#       loss = "mse",
+#       optimizer = optimizer_adam(learning_rate = 0.001),
+#       metrics = c("mae")
+#     )
+#     
+#     # Train
+#     tryCatch({
+#       history <- model %>% fit(
+#         x = X_mat,
+#         y = Y_pseudo_train,
+#         epochs = epochs,
+#         batch_size = batch_size,
+#         verbose = 0,
+#         validation_split = 0.2
+#       )
+#       
+#       success <- TRUE
+#     }, error = function(e) {
+#       warning("DeepSurv training failed: ", e$message)
+#       success <<- FALSE
+#     })
+#     
+#     if (!exists("success") || !success) {
+#       # Fallback to Cox
+#       return(cox_surv_learner()(X, time, event, tau))
+#     }
+#     
+#     list(
+#       model = model,
+#       predict = function(newX) {
+#         as.numeric(predict(model, as.matrix(newX)))
+#       }
+#     )
+#   }
+# }
+# ============================================================================
 
 dml_partial_linear <- function(Y, D, X, outcome_learner, treatment_learner, K = 5, seed = 202501) {
   n <- length(Y)
@@ -584,7 +513,7 @@ dml_partial_linear <- function(Y, D, X, outcome_learner, treatment_learner, K = 
   list(
     theta = theta_hat,
     se = se_hat,
-    ci = c(theta_hat - 1.645 * se_hat, theta_hat + 1.645 * se_hat),
+    ci = c(theta_hat - 1.96 * se_hat, theta_hat + 1.96 * se_hat),
     folds = folds
   )
 }
@@ -592,8 +521,9 @@ dml_partial_linear <- function(Y, D, X, outcome_learner, treatment_learner, K = 
 #' DML for Survival Outcomes using Survival-specific Learners
 #' 
 #' This function implements doubly robust machine learning for survival outcomes.
-#' The outcome learner uses survival models (Cox, RSF, DeepSurv) to predict RMST,
+#' The outcome learner uses survival models (Cox, RSF) to predict RMST,
 #' then computes residuals for orthogonalization.
+#' Note: DeepSurv is currently commented out due to keras installation issues.
 #' 
 #' @param time Observed survival time
 #' @param event Event indicator (1 = event, 0 = censored)
@@ -657,66 +587,11 @@ dml_partial_linear_survival <- function(time, event, D, X,
   list(
     theta = theta_hat,
     se = se_hat,
-    ci = c(theta_hat - 1.645 * se_hat, theta_hat + 1.645 * se_hat),
+    ci = c(theta_hat - 1.96 * se_hat, theta_hat + 1.96 * se_hat),
     folds = folds,
     Y_pseudo = Y_pseudo,
     y_tilde = y_tilde,
     d_tilde = d_tilde
-  )
-}
-
-bart_dml_partial <- function(Y, D, X, split_label, K = 5, seed = 202501,
-                             ntree = 150, ndpost = 750, nskip = 250) {
-  n <- length(Y)
-  if (!n || nrow(X) == 0) {
-    return(dplyr::tibble())
-  }
-  stopifnot(length(D) == n, nrow(X) == n)
-  set.seed(seed)
-  folds <- sample(rep(1:K, length.out = n))
-  y_tilde <- numeric(n)
-  d_tilde <- numeric(n)
-  for (k in seq_len(K)) {
-    idx_train <- folds != k
-    idx_test <- folds == k
-    # Outcome learner: now wbart (regression) for continuous pseudo-outcome
-    outcome_fit <- BART::wbart(
-      x.train = X[idx_train, , drop = FALSE],
-      y.train = Y[idx_train],
-      x.test = X[idx_test, , drop = FALSE],
-      ntree = ntree,
-      ndpost = ndpost,
-      nskip = nskip,
-      sparse = TRUE,
-      usequants = TRUE
-    )
-    # Treatment learner: wbart (regression) for continuous pathway score
-    treatment_fit <- BART::wbart(
-      x.train = X[idx_train, , drop = FALSE],
-      y.train = D[idx_train],
-      x.test = X[idx_test, , drop = FALSE],
-      ntree = ntree,
-      ndpost = ndpost,
-      nskip = nskip,
-      sparse = TRUE,
-      usequants = TRUE
-    )
-    # Extract predictions (now continuous for both)
-    g_hat <- as.numeric(outcome_fit$yhat.test.mean)
-    m_hat <- as.numeric(treatment_fit$yhat.test.mean)
-    y_tilde[idx_test] <- Y[idx_test] - g_hat
-    d_tilde[idx_test] <- D[idx_test] - m_hat
-  }
-  dr_fit <- stats::lm(y_tilde ~ d_tilde)
-  theta_hat <- stats::coef(dr_fit)["d_tilde"]
-  se_hat <- summary(dr_fit)$coefficients["d_tilde", "Std. Error"]
-  dplyr::tibble(
-    split = split_label,
-    model = "DR-BART",
-    theta = theta_hat,
-    se = se_hat,
-    ci_lower = theta_hat - 1.645 * se_hat,
-    ci_upper = theta_hat + 1.645 * se_hat
   )
 }
 
@@ -1094,11 +969,17 @@ train_plot_df <- data.frame(
 #################################################################################
 ## DEG identification using limma-voom and edgeR on training set only
 ###################################################################################
-## keep genes with at least 20% samples having expression > 1 (z-score)
-keep_genes <- apply(expr_train, 1, function(x) sum(x > 1) >= 0.2 * length(x))
+# NOTE: DEG analysis commented out due to volcano plot rendering issues
+#       (viewport zero dimension / font family errors on Windows)
+#       This section is independent from downstream GSVA pathway analysis
+# 
+# # keep genes with at least 20% samples having expression > 1 (z-score)
+# keep_genes <- apply(expr_train, 1, function(x) sum(x > 1) >= 0.2 * length(x))
+# dt_train_all <- clinical_splits$train
+# 
+# # Filter to samples with complete survival pseudo-outcome (Y_pseudo) for pathway ranking
+# outcome_complete <- !is.na(clinical_splits$train$Y_pseudo)
 dt_train_all <- clinical_splits$train
-
-# Filter to samples with complete survival pseudo-outcome (Y_pseudo) for pathway ranking
 outcome_complete <- !is.na(dt_train_all$Y_pseudo)
 cat(sprintf("dt_train_all samples with Y_pseudo: %d out of %d\n", 
     sum(outcome_complete), nrow(dt_train_all)))
@@ -1109,207 +990,207 @@ if (sum(outcome_complete) == 0) {
 
 dt_train <- dt_train_all[outcome_complete, , drop = FALSE]
 
-expr_train_stage <- expr_train[, dt_train$patient_id, drop = FALSE]
-expr_filt <- expr_train_stage[keep_genes, , drop = FALSE]
-
-# DEG analysis using survival outcome (Event vs Censored) instead of tumor stage
-# Filter to samples with complete OS_STATUS_BINARY
-outcome_status_complete <- !is.na(dt_train$OS_STATUS_BINARY)
-dt_train_deg <- dt_train[outcome_status_complete, , drop = FALSE]
-expr_filt_deg <- expr_filt[, dt_train_deg$patient_id, drop = FALSE]
-
-grp_train <- factor(dt_train_deg$OS_STATUS_BINARY, levels = c(0, 1), labels = c("Censored", "Event"))
-cat(sprintf("DEG analysis: %d Censored, %d Event\n", 
-    sum(grp_train == "Censored"), sum(grp_train == "Event")))
-stopifnot(length(grp_train) == ncol(expr_filt_deg))
-
-design <- stats::model.matrix(~ grp_train) # Event vs Censored
-fit <- limma::lmFit(expr_filt_deg, design)
-fit <- limma::eBayes(fit)
-fit$genes <- data.frame(gene = rownames(expr_filt_deg))
-
-# limma results: Event vs Censored
-res_limma <- limma::topTable(
-  fit,
-  coef = "grp_trainEvent",
-  number = Inf,
-  adjust.method = "BH"
-) %>%
-  as.data.frame()
-
-cat("\n=== DEG Analysis Summary (Event vs Censored) ===\n")
-
-# argument on cutoff selection. note the small estimated effects overall. The middle 50% of logFC is roughly 
-# [−0.024, 0.027], and the most extreme values are only about −0.95 to +1.01
-summary(res_limma)
-
-# thresholds
-alpha_fdr <- 0.10 # conservative for exploratory analysis
-lfc_cut   <- 0.2          # ~1.15-fold
-top_n_sig <- 10
-top_n_nsig <- 10
-
-# pull rownames in as gene IDs
-if (!"gene" %in% colnames(res_limma)) {
-  res_limma <- res_limma %>% tibble::rownames_to_column("gene")
-}
-
-# annotate direction + DEG class on the same dataset
-res_annot <- res_limma %>%
-  mutate(
-    neglog10_adjP = -log10(adj.P.Val),
-    direction = case_when(
-      logFC >=  lfc_cut ~ "Up",
-      logFC <= -lfc_cut ~ "Down",
-      TRUE              ~ "None"
-    ),
-    deg_class = case_when(
-      adj.P.Val < alpha_fdr & logFC >=  lfc_cut ~ "Upregulated in Event",
-      adj.P.Val < alpha_fdr & logFC <= -lfc_cut ~ "Downregulated in Event",
-      TRUE                                  ~ "Not significant"
-    )
-  )
-
-# select DEGs for downstream (GSVA / pathway enrichment / causal) 
-deg_limma_selected <- res_annot %>%
-  filter(adj.P.Val < alpha_fdr, abs(logFC) >= lfc_cut) %>%
-  arrange(adj.P.Val)
-
-if (!nrow(deg_limma_selected)) {
-  warning("No DEGs passed the specified FDR/logFC thresholds; using top 50 genes by adjusted p-value as a fallback.")
-  deg_limma_selected <- res_annot %>%
-    arrange(adj.P.Val) %>%
-    slice_head(n = 50)
-}
-
-deg_genes <- deg_limma_selected$gene
-length(deg_genes)
-
-# Separate up vs down gene sets (useful for enrichment or signed analyses)
-deg_genes_up   <- deg_limma_selected %>% filter(logFC >=  lfc_cut) %>% pull(gene)
-deg_genes_down <- deg_limma_selected %>% filter(logFC <= -lfc_cut) %>% pull(gene)
-
-# Table of up and down regulated DEGs (Event vs Censored)
-deg_tbl_up <- deg_limma_selected %>%
-  filter(deg_class == "Upregulated in Event") %>%
-  arrange(adj.P.Val, desc(logFC)) %>%
-  dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
-  slice_head(n = 10)
-
-deg_tbl_down <- deg_limma_selected %>%
-  filter(deg_class == "Downregulated in Event") %>%
-  arrange(adj.P.Val, logFC) %>%   # most negative first
-  dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
-  slice_head(n = 10)
-
-deg_tbl <- bind_rows(deg_tbl_up, deg_tbl_down)
-
-knitr::kable(
-  deg_tbl,
-  format = "latex",
-  booktabs = TRUE,
-  digits = 4,
-  caption = "Top Upregulated and Downregulated DEGs identified by limma"
-)
-
-# Volcano plot with correct coloring for up, down, and non-sig genes with labels
-volcano_data <- res_annot
-# Label selection:
-# For Up/Down: top N by abs(logFC)
-# For Not significant: top N by a stable "extremeness" score
-label_data <- bind_rows(
-  volcano_data %>%
-    filter(deg_class %in% c("Upregulated in Event", "Downregulated in Event")) %>%
-    arrange(desc(abs(logFC))) %>%
-    group_by(deg_class) %>%
-    slice_head(n = top_n_sig) %>%
-    ungroup(),
-  volcano_data %>%
-    filter(deg_class == "Not significant") %>%
-    mutate(extremeness = neglog10_adjP * abs(logFC)) %>%
-    arrange(desc(extremeness)) %>%
-    slice_head(n = top_n_nsig)
-)
-volcano_data$deg_class <- factor(
-  volcano_data$deg_class,
-  levels = c("Upregulated in Event", "Downregulated in Event", "Not significant")
-)
-
-volcano_plot <- ggplot(volcano_data, aes(x = logFC, y = neglog10_adjP, color = as.factor(deg_class))) +
-  geom_point(alpha = 0.6, size = 1.2) +
-  geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", linewidth = 0.4) +
-  geom_hline(yintercept = -log10(alpha_fdr), linetype = "dashed", linewidth = 0.4) +
-  ggrepel::geom_text_repel(
-    data = label_data,
-    aes(label = gene),
-    size = 3,
-    max.overlaps = Inf,
-    box.padding = 0.3,
-    point.padding = 0.2,
-    segment.alpha = 0.6
-  ) +
-  scale_color_manual(values = c(
-    "Upregulated in Event"     = "red",
-    "Downregulated in Event"   = "blue",
-    "Not significant" = "black"
-  )) +
-  labs(
-    title = "(a) Volcano plot of DEGs in Event vs Censored patients",
-    x = "log2 Fold Change (Event vs Censored)",
-    y = "-log10(FDR)",
-    color = "DEG class"
-  ) +
-  theme_nature()
-
-volcano_plot
-# save the 600 dpi image in results folder
-ggsave(
-  filename = "results/[a]limma_deg_volcano_plot.png",
-  plot = volcano_plot,
-  width = 6,
-  height = 5,
-  dpi = 600
-)
-
-# Top DEG genes for downstream analyses (fallback to overall top-ranked genes if up/down tables are empty)
-top_gene_candidates <- unique(c(deg_tbl_up$gene, deg_tbl_down$gene))
-if (!length(top_gene_candidates)) {
-  top_gene_candidates <- deg_limma_selected %>%
-    arrange(adj.P.Val) %>%
-    pull(gene)
-}
-top_genes <- top_gene_candidates[top_gene_candidates %in% rownames(expr_splits$train)]
-
-if (!length(top_genes)) {
-  stop("No DEG genes overlap with expression matrix after filtering; cannot proceed to downstream analyses.")
-}
-
-## Expression of top DEGs by survival outcome
-exp_top <- expr_splits$train[top_genes, dt_train_deg$patient_id, drop = FALSE]
-exp_top_df <- as.data.frame(t(exp_top)) %>%
-  dplyr::mutate(patient_id = rownames(.)) %>%
-  dplyr::left_join(dt_train_deg %>% dplyr::select(patient_id, OS_STATUS_BINARY), by = "patient_id") %>%
-  dplyr::mutate(outcome_group = factor(OS_STATUS_BINARY, levels = c(0, 1), labels = c("Censored", "Event"))) %>%
-  tidyr::pivot_longer(cols = all_of(top_genes), names_to = "gene", values_to = "expression")
-
-## Boxplots of top DEGs expression by survival outcome
-boxplot_top_degs <- ggplot(exp_top_df, aes(x = outcome_group, y = expression, fill = outcome_group)) +
-  geom_boxplot() +
-  facet_wrap(~ gene, scales = "free_y") +
-  labs(title = "(b) Expression of top DEGs by Survival Outcome",
-       x = "Survival Outcome",
-       y = "Expression scores") +
-  scale_fill_manual(values = c("Censored" = "#63A375", "Event" = "#E4572E")) +
-  theme(legend.position = "none")+
-  theme_nature()
-boxplot_top_degs
-# save the 600 dpi image in results folder
-ggsave(boxplot_top_degs,
-       filename = "results/[b]top_degs_boxplot.png",
-       width = 8,
-       height = 6,
-       dpi = 600
-)
+# expr_train_stage <- expr_train[, dt_train$patient_id, drop = FALSE]
+# expr_filt <- expr_train_stage[keep_genes, , drop = FALSE]
+# 
+# # DEG analysis using survival outcome (Event vs Censored) instead of tumor stage
+# # Filter to samples with complete OS_STATUS_BINARY
+# outcome_status_complete <- !is.na(dt_train$OS_STATUS_BINARY)
+# dt_train_deg <- dt_train[outcome_status_complete, , drop = FALSE]
+# expr_filt_deg <- expr_filt[, dt_train_deg$patient_id, drop = FALSE]
+# 
+# grp_train <- factor(dt_train_deg$OS_STATUS_BINARY, levels = c(0, 1), labels = c("Censored", "Event"))
+# cat(sprintf("DEG analysis: %d Censored, %d Event\n", 
+#     sum(grp_train == "Censored"), sum(grp_train == "Event")))
+# stopifnot(length(grp_train) == ncol(expr_filt_deg))
+# 
+# design <- stats::model.matrix(~ grp_train) # Event vs Censored
+# fit <- limma::lmFit(expr_filt_deg, design)
+# fit <- limma::eBayes(fit)
+# fit$genes <- data.frame(gene = rownames(expr_filt_deg))
+# 
+# # limma results: Event vs Censored
+# res_limma <- limma::topTable(
+#   fit,
+#   coef = "grp_trainEvent",
+#   number = Inf,
+#   adjust.method = "BH"
+# ) %>%
+#   as.data.frame()
+# 
+# cat("\n=== DEG Analysis Summary (Event vs Censored) ===\n")
+# 
+# # argument on cutoff selection. note the small estimated effects overall. The middle 50% of logFC is roughly 
+# # [−0.024, 0.027], and the most extreme values are only about −0.95 to +1.01
+# summary(res_limma)
+# 
+# # thresholds
+# alpha_fdr <- 0.10 # conservative for exploratory analysis
+# lfc_cut   <- 0.2          # ~1.15-fold
+# top_n_sig <- 10
+# top_n_nsig <- 10
+# 
+# # pull rownames in as gene IDs
+# if (!"gene" %in% colnames(res_limma)) {
+#   res_limma <- res_limma %>% tibble::rownames_to_column("gene")
+# }
+# 
+# # annotate direction + DEG class on the same dataset
+# res_annot <- res_limma %>%
+#   mutate(
+#     neglog10_adjP = -log10(adj.P.Val),
+#     direction = case_when(
+#       logFC >=  lfc_cut ~ "Up",
+#       logFC <= -lfc_cut ~ "Down",
+#       TRUE              ~ "None"
+#     ),
+#     deg_class = case_when(
+#       adj.P.Val < alpha_fdr & logFC >=  lfc_cut ~ "Upregulated in Event",
+#       adj.P.Val < alpha_fdr & logFC <= -lfc_cut ~ "Downregulated in Event",
+#       TRUE                                  ~ "Not significant"
+#     )
+#   )
+# 
+# # select DEGs for downstream (GSVA / pathway enrichment / causal) 
+# deg_limma_selected <- res_annot %>%
+#   filter(adj.P.Val < alpha_fdr, abs(logFC) >= lfc_cut) %>%
+#   arrange(adj.P.Val)
+# 
+# if (!nrow(deg_limma_selected)) {
+#   warning("No DEGs passed the specified FDR/logFC thresholds; using top 50 genes by adjusted p-value as a fallback.")
+#   deg_limma_selected <- res_annot %>%
+#     arrange(adj.P.Val) %>%
+#     slice_head(n = 50)
+# }
+# 
+# deg_genes <- deg_limma_selected$gene
+# length(deg_genes)
+# 
+# # Separate up vs down gene sets (useful for enrichment or signed analyses)
+# deg_genes_up   <- deg_limma_selected %>% filter(logFC >=  lfc_cut) %>% pull(gene)
+# deg_genes_down <- deg_limma_selected %>% filter(logFC <= -lfc_cut) %>% pull(gene)
+# 
+# # Table of up and down regulated DEGs (Event vs Censored)
+# deg_tbl_up <- deg_limma_selected %>%
+#   filter(deg_class == "Upregulated in Event") %>%
+#   arrange(adj.P.Val, desc(logFC)) %>%
+#   dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
+#   slice_head(n = 10)
+# 
+# deg_tbl_down <- deg_limma_selected %>%
+#   filter(deg_class == "Downregulated in Event") %>%
+#   arrange(adj.P.Val, logFC) %>%   # most negative first
+#   dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
+#   slice_head(n = 10)
+# 
+# deg_tbl <- bind_rows(deg_tbl_up, deg_tbl_down)
+# 
+# knitr::kable(
+#   deg_tbl,
+#   format = "latex",
+#   booktabs = TRUE,
+#   digits = 4,
+#   caption = "Top Upregulated and Downregulated DEGs identified by limma"
+# )
+# 
+# # Volcano plot with correct coloring for up, down, and non-sig genes with labels
+# volcano_data <- res_annot
+# # Label selection:
+# # For Up/Down: top N by abs(logFC)
+# # For Not significant: top N by a stable "extremeness" score
+# label_data <- bind_rows(
+#   volcano_data %>%
+#     filter(deg_class %in% c("Upregulated in Event", "Downregulated in Event")) %>%
+#     arrange(desc(abs(logFC))) %>%
+#     group_by(deg_class) %>%
+#     slice_head(n = top_n_sig) %>%
+#     ungroup(),
+#   volcano_data %>%
+#     filter(deg_class == "Not significant") %>%
+#     mutate(extremeness = neglog10_adjP * abs(logFC)) %>%
+#     arrange(desc(extremeness)) %>%
+#     slice_head(n = top_n_nsig)
+# )
+# volcano_data$deg_class <- factor(
+#   volcano_data$deg_class,
+#   levels = c("Upregulated in Event", "Downregulated in Event", "Not significant")
+# )
+# 
+# volcano_plot <- ggplot(volcano_data, aes(x = logFC, y = neglog10_adjP, color = as.factor(deg_class))) +
+#   geom_point(alpha = 0.6, size = 1.2) +
+#   geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", linewidth = 0.4) +
+#   geom_hline(yintercept = -log10(alpha_fdr), linetype = "dashed", linewidth = 0.4) +
+#   ggrepel::geom_text_repel(
+#     data = label_data,
+#     aes(label = gene),
+#     size = 3,
+#     max.overlaps = Inf,
+#     box.padding = 0.3,
+#     point.padding = 0.2,
+#     segment.alpha = 0.6
+#   ) +
+#   scale_color_manual(values = c(
+#     "Upregulated in Event"     = "red",
+#     "Downregulated in Event"   = "blue",
+#     "Not significant" = "black"
+#   )) +
+#   labs(
+#     title = "(a) Volcano plot of DEGs in Event vs Censored patients",
+#     x = "log2 Fold Change (Event vs Censored)",
+#     y = "-log10(FDR)",
+#     color = "DEG class"
+#   ) +
+#   theme_nature()
+# 
+# volcano_plot
+# # save the 600 dpi image in results folder
+# ggsave(
+#   filename = "results/[a]limma_deg_volcano_plot.png",
+#   plot = volcano_plot,
+#   width = 6,
+#   height = 5,
+#   dpi = 600
+# )
+# 
+# # Top DEG genes for downstream analyses (fallback to overall top-ranked genes if up/down tables are empty)
+# top_gene_candidates <- unique(c(deg_tbl_up$gene, deg_tbl_down$gene))
+# if (!length(top_gene_candidates)) {
+# top_gene_candidates <- deg_limma_selected %>%
+#     arrange(adj.P.Val) %>%
+#     pull(gene)
+# }
+# top_genes <- top_gene_candidates[top_gene_candidates %in% rownames(expr_splits$train)]
+# 
+# if (!length(top_genes)) {
+#   stop("No DEG genes overlap with expression matrix after filtering; cannot proceed to downstream analyses.")
+# }
+# 
+# ## Expression of top DEGs by survival outcome
+# exp_top <- expr_splits$train[top_genes, dt_train_deg$patient_id, drop = FALSE]
+# exp_top_df <- as.data.frame(t(exp_top)) %>%
+#   dplyr::mutate(patient_id = rownames(.)) %>%
+#   dplyr::left_join(dt_train_deg %>% dplyr::select(patient_id, OS_STATUS_BINARY), by = "patient_id") %>%
+#   dplyr::mutate(outcome_group = factor(OS_STATUS_BINARY, levels = c(0, 1), labels = c("Censored", "Event"))) %>%
+#   tidyr::pivot_longer(cols = all_of(top_genes), names_to = "gene", values_to = "expression")
+# 
+# ## Boxplots of top DEGs expression by survival outcome
+# boxplot_top_degs <- ggplot(exp_top_df, aes(x = outcome_group, y = expression, fill = outcome_group)) +
+#   geom_boxplot() +
+#   facet_wrap(~ gene, scales = "free_y") +
+#   labs(title = "(b) Expression of top DEGs by Survival Outcome",
+#        x = "Survival Outcome",
+#        y = "Expression scores") +
+#   scale_fill_manual(values = c("Censored" = "#63A375", "Event" = "#E4572E")) +
+#   theme(legend.position = "none")+
+#   theme_nature()
+# boxplot_top_degs
+# # save the 600 dpi image in results folder
+# ggsave(boxplot_top_degs,
+#        filename = "results/[b]top_degs_boxplot.png",
+#        width = 8,
+#        height = 6,
+#        dpi = 600
+# )
 
 #################################################################################
 # GSVA-driven pathway ranking ----
@@ -1690,6 +1571,10 @@ run_split_dml <- function(df, split_label) {
 
   cat(sprintf("\n=== Running DML for split: %s ===\n", split_label))
   
+  # Unified treatment learner for fair comparison across all DR methods
+  treatment_learner_rf <- ranger_learner(task = "regression", num.trees = 1200)
+  cat("Using unified Random Forest treatment learner for all DR methods.\n\n")
+  
   # DR-Cox: Uses Cox model to predict RMST, then compute residuals
   cat("Running DR-Cox (Cox survival model for outcome + RF for treatment)...\n")
   cox_fit <- dml_partial_linear_survival(
@@ -1698,7 +1583,7 @@ run_split_dml <- function(df, split_label) {
     D = df$pathway_score,
     X = cov_df,
     outcome_learner_surv = cox_surv_learner(),
-    treatment_learner = ranger_learner(task = "regression", num.trees = 1200),
+    treatment_learner = treatment_learner_rf,
     tau = 120,
     K = 5,
     seed = 202501
@@ -1712,52 +1597,52 @@ run_split_dml <- function(df, split_label) {
     D = df$pathway_score,
     X = cov_df,
     outcome_learner_surv = rsf_surv_learner(num.trees = 500),
-    treatment_learner = ranger_learner(task = "regression", num.trees = 1200),
+    treatment_learner = treatment_learner_rf,
     tau = 120,
     K = 5,
     seed = 202501
   )
   
-  # DR-DeepSurv: Uses neural network (DeepSurv) to predict RMST + RF for treatment
-  cat("Running DR-DeepSurv (Deep learning for outcome + RF for treatment)...\n")
-  deepsurv_fit <- tryCatch({
-    dml_partial_linear_survival(
-      time = df$OS_MONTHS,
-      event = df$OS_STATUS_BINARY,
-      D = df$pathway_score,
-      X = cov_df,
-      outcome_learner_surv = deepsurv_learner(hidden_units = c(64, 32), epochs = 50),
-      treatment_learner = ranger_learner(task = "regression", num.trees = 1200),
-      tau = 120,
-      K = 5,
-      seed = 202501
-    )
-  }, error = function(e) {
-    warning("DeepSurv failed, skipping: ", e$message)
-    list(theta = NA, se = NA, ci = c(NA, NA))
-  })
+  # DR-DeepSurv: COMMENTED OUT (keras installation issues)
+  # cat("Running DR-DeepSurv (Deep learning for outcome + RF for treatment)...\n")
+  # deepsurv_fit <- tryCatch({
+  #   dml_partial_linear_survival(
+  #     time = df$OS_MONTHS,
+  #     event = df$OS_STATUS_BINARY,
+  #     D = df$pathway_score,
+  #     X = cov_df,
+  #     outcome_learner_surv = deepsurv_learner(hidden_units = c(64, 32), epochs = 50),
+  #     treatment_learner = treatment_learner_rf,
+  #     tau = 120,
+  #     K = 5,
+  #     seed = 202501
+  #   )
+  # }, error = function(e) {
+  #   warning("DeepSurv failed, skipping: ", e$message)
+  #   list(theta = NA, se = NA, ci = c(NA, NA))
+  # })
   
-  # DR-GLMNET: Uses simple regression on Y_pseudo (baseline)
-  cat("Running DR-GLMNET (baseline regression on Y_pseudo)...\n")
+  # DR-GLMNET: Uses GLMNET regression on Y_pseudo with unified RF treatment learner
+  cat("Running DR-GLMNET (GLMNET on Y_pseudo + RF for treatment)...\n")
   glmnet_fit <- dml_partial_linear(
     Y = df$Y_pseudo,
     D = df$pathway_score,
     X = cov_matrix,
     outcome_learner = glmnet_learner(family = "gaussian", alpha = 0.5),
-    treatment_learner = glmnet_learner(family = "gaussian", alpha = 0.5),
+    treatment_learner = treatment_learner_rf,
     K = 5,
     seed = 202501
   )
 
   
-  # Return results (filter out NA results from failed models)
+  # Return results (DeepSurv commented out)
   results <- dplyr::tibble(
     split = split_label,
-    model = c("DR-Cox", "DR-RSF", "DR-DeepSurv", "DR-GLMNET"),
-    theta = c(cox_fit$theta, rsf_fit$theta, deepsurv_fit$theta, glmnet_fit$theta),
-    se = c(cox_fit$se, rsf_fit$se, deepsurv_fit$se, glmnet_fit$se),
-    ci_lower = c(cox_fit$ci[1], rsf_fit$ci[1], deepsurv_fit$ci[1], glmnet_fit$ci[1]),
-    ci_upper = c(cox_fit$ci[2], rsf_fit$ci[2], deepsurv_fit$ci[2], glmnet_fit$ci[2])
+    model = c("DR-Cox", "DR-RSF", "DR-GLMNET"),
+    theta = c(cox_fit$theta, rsf_fit$theta, glmnet_fit$theta),
+    se = c(cox_fit$se, rsf_fit$se, glmnet_fit$se),
+    ci_lower = c(cox_fit$ci[1], rsf_fit$ci[1], glmnet_fit$ci[1]),
+    ci_upper = c(cox_fit$ci[2], rsf_fit$ci[2], glmnet_fit$ci[2])
   )
   
   # Filter out failed models (NA theta)
@@ -1774,6 +1659,8 @@ dml_split_tbl <- dplyr::bind_rows(
 
 cat("\n=== Doubly Robust Estimates for GSVA Treatment Effect on RMST (Survival Outcome) ===\n")
 cat("Interpretation: theta = change in RMST (months) per 1-unit increase in pathway score\n\n")
+cat("Note: DR-DeepSurv is commented out due to keras installation issues.\n")
+cat("Using DR-Cox, DR-RSF, and DR-GLMNET for analysis.\n\n")
 print("Doubly robust estimates for GSVA treatment effect on RMST (all splits):")
 print(dml_split_tbl)
 cat("\nNote: These estimates use cross-fitting with K=5 folds to prevent overfitting.\n")
@@ -1802,89 +1689,12 @@ trainval_cov_df <- apply_imputer(trainval_df, cov_imputer_trainval)
 X_trainval_cov <- model.matrix(cov_formula, data = trainval_cov_df)
 X_trainval_full <- cbind(pathway_score = trainval_df$pathway_score, X_trainval_cov)
 
-# GLMNET regression model for RMST pseudo-outcome prediction
-glmnet_regressor <- glmnet::cv.glmnet(
-  X_trainval_full,
-  trainval_df$Y_pseudo,  # Continuous RMST pseudo-outcome
-  family = "gaussian",   # Regression instead of classification
-  alpha = 0.5
-)
+# Note: Model performance evaluation has been removed as this analysis focuses on
+# causal effect estimation using survival-specific DR methods (Cox, RSF, GLMNET).
+# DeepSurv is commented out due to keras installation issues.
+# For predictive modeling, please use dedicated survival prediction pipelines.
 
-test_cov_df <- apply_imputer(test_df, cov_imputer_trainval)
-X_test_cov <- model.matrix(cov_formula, data = test_cov_df)
-X_test_full <- cbind(pathway_score = test_df$pathway_score, X_test_cov)
-glmnet_test_pred <- as.numeric(stats::predict(glmnet_regressor, newx = X_test_full, s = "lambda.min", type = "response"))
-
-# Compute prediction metrics for continuous outcome (MSE, MAE, R^2)
-glmnet_mse <- mean((glmnet_test_pred - test_df$Y_pseudo)^2)
-glmnet_mae <- mean(abs(glmnet_test_pred - test_df$Y_pseudo))
-glmnet_r2 <- 1 - sum((test_df$Y_pseudo - glmnet_test_pred)^2) / sum((test_df$Y_pseudo - mean(test_df$Y_pseudo))^2)
-
-# Random Forest regression model for RMST pseudo-outcome prediction
-rf_features <- c("pathway_score", adjustment_covariates)
-rf_imputer <- fit_imputer(trainval_df, rf_features)
-rf_train_df <- apply_imputer(trainval_df, rf_imputer)
-rf_train_df$Y_pseudo <- trainval_df$Y_pseudo  # Add continuous outcome
-
-rf_regressor <- ranger::ranger(
-  Y_pseudo ~ .,  # Regression on RMST pseudo-outcome
-  data = rf_train_df,
-  num.trees = 1500,
-  mtry = max(1, floor(sqrt(ncol(rf_train_df) - 1))),
-  respect.unordered.factors = "order",
-  seed = 202501
-)
-
-rf_test_df <- apply_imputer(test_df, rf_imputer)
-rf_test_pred <- as.numeric(predict(rf_regressor, data = rf_test_df)$predictions)
-
-# Compute prediction metrics for continuous outcome
-rf_mse <- mean((rf_test_pred - test_df$Y_pseudo)^2)
-rf_mae <- mean(abs(rf_test_pred - test_df$Y_pseudo))
-rf_r2 <- 1 - sum((test_df$Y_pseudo - rf_test_pred)^2) / sum((test_df$Y_pseudo - mean(test_df$Y_pseudo))^2)
-
-# Bayesian Additive Regression Trees for RMST pseudo-outcome regression
-bart_seed <- 202501
-set.seed(bart_seed)
-bart_fit <- BART::wbart(  # Changed from pbart to wbart for regression
-  x.train = X_trainval_full,
-  y.train = trainval_df$Y_pseudo,  # Continuous RMST pseudo-outcome
-  x.test = X_test_full,
-  ntree = 200,
-  ndpost = 1500,
-  nskip = 500,
-  usequants = TRUE,
-  sparse = TRUE
-)
-bart_test_pred <- as.numeric(bart_fit$yhat.test.mean)  # Changed from prob.test.mean
-
-# Compute prediction metrics for continuous outcome
-bart_mse <- mean((bart_test_pred - test_df$Y_pseudo)^2)
-bart_mae <- mean(abs(bart_test_pred - test_df$Y_pseudo))
-bart_r2 <- 1 - sum((test_df$Y_pseudo - bart_test_pred)^2) / sum((test_df$Y_pseudo - mean(test_df$Y_pseudo))^2)
-
-model_metrics <- dplyr::tibble(
-  model = c("DR-GLMNET", "DR-RF", "DR-BART"),
-  test_mse = c(glmnet_mse, rf_mse, bart_mse),
-  test_mae = c(glmnet_mae, rf_mae, bart_mae),
-  test_r2 = c(glmnet_r2, rf_r2, bart_r2)
-)
-
-cat("\n=== Test-set Predictive Performance for RMST Pseudo-outcome (Regression Metrics) ===\n")
-print(model_metrics)
-cat("\nNote: Lower MSE/MAE and higher R^2 indicate better predictive performance.\n")
-
-reporting_candidates <- c("DR-GLMNET", "DR-RF", "DR-BART")
-best_model <- model_metrics %>%
-  dplyr::filter(model %in% reporting_candidates) %>%
-  dplyr::arrange(test_mse, dplyr::desc(test_r2)) %>%  # Best = lowest MSE, highest R2
-  dplyr::slice_head(n = 1) %>%
-  dplyr::pull(model)
-
-best_effect <- dr_effects_tbl %>% dplyr::filter(model == best_model)
-
-message(sprintf("Selected model for reporting (based on test AUC): %s", best_model))
-print(best_effect)
+reporting_candidates <- c("DR-Cox", "DR-RSF", "DR-GLMNET")
 
 
 #################################################################################
@@ -1907,31 +1717,22 @@ clinical_cov_df <- apply_imputer(train_df, clinical_imp)
 clinical_matrix <- model.matrix(clinical_formula, data = clinical_cov_df)
 
 # Sensitivity analysis: estimate treatment effect using clinical covariates only
+# Use unified RF treatment learner for consistency
 clinical_glmnet <- dml_partial_linear(
   Y = train_df$Y_pseudo,  # RMST pseudo-outcome
   D = train_df$pathway_score,
   X = clinical_matrix,
   outcome_learner = glmnet_learner(family = "gaussian", alpha = 0.5),
-  treatment_learner = glmnet_learner(family = "gaussian", alpha = 0.5),
-  K = 5,
-  seed = 202501
-)
-
-clinical_rf <- dml_partial_linear(
-  Y = train_df$Y_pseudo,  # RMST pseudo-outcome
-  D = train_df$pathway_score,
-  X = clinical_cov_df,
-  outcome_learner = ranger_learner(task = "regression", num.trees = 1200),
   treatment_learner = ranger_learner(task = "regression", num.trees = 1200),
   K = 5,
   seed = 202501
 )
 
 clinical_sensitivity_tbl <- dplyr::tibble(
-  model = c("DR-GLMNET", "DR-RF"),
-  theta = c(clinical_glmnet$theta, clinical_rf$theta),
-  ci_lower = c(clinical_glmnet$ci[1], clinical_rf$ci[1]),
-  ci_upper = c(clinical_glmnet$ci[2], clinical_rf$ci[2])
+  model = c("DR-GLMNET"),
+  theta = c(clinical_glmnet$theta),
+  ci_lower = c(clinical_glmnet$ci[1]),
+  ci_upper = c(clinical_glmnet$ci[2])
 )
 print("Sensitivity (clinical-only covariates) DR estimates:")
 print(clinical_sensitivity_tbl)
