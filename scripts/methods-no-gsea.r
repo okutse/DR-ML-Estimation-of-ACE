@@ -872,11 +872,55 @@ log_split_summary(test_ids, dt2, "test")
 
 collapse_duplicate_genes <- function(mat) {
   rn <- rownames(mat)
+  dup_gene_names <- unique(rn[duplicated(rn)])
+  n_dup_gene_rows <- sum(duplicated(rn))
+  n_dup_gene_names <- length(dup_gene_names)
+
+  cn <- colnames(mat)
+  dup_col_names <- unique(cn[duplicated(cn)])
+  n_dup_col_cols <- sum(duplicated(cn))
+  n_dup_col_names <- length(dup_col_names)
+
+  if (n_dup_gene_names > 0 || n_dup_col_names > 0) {
+    cat(sprintf("Duplicate genes detected: %d rows across %d gene names.\n",
+                n_dup_gene_rows, n_dup_gene_names))
+    cat(sprintf("Duplicate columns detected: %d columns across %d column names.\n",
+                n_dup_col_cols, n_dup_col_names))
+  }
+
+  if (n_dup_gene_names > 0) {
+    cat("First 20 duplicate gene names:\n")
+    print(utils::head(dup_gene_names, 20))
+
+    k <- min(3, ncol(mat))
+    if (k > 0) {
+      gene_means_list <- lapply(utils::head(dup_gene_names, 20), function(g) {
+        sub_mat <- mat[rn == g, seq_len(k), drop = FALSE]
+        data.frame(
+          gene = g,
+          t(colMeans(sub_mat, na.rm = TRUE)),
+          stringsAsFactors = FALSE
+        )
+      })
+      gene_means_df <- dplyr::bind_rows(gene_means_list)
+      colnames(gene_means_df)[-1] <- paste0("mean_col", seq_len(k))
+      cat(sprintf("Mean of columns 1..%d before collapse (first 20 duplicate genes):\n", k))
+      print(gene_means_df)
+    }
+  }
+
+  if (n_dup_col_names > 0) {
+    cat("First 20 duplicate column names:\n")
+    print(utils::head(dup_col_names, 20))
+  }
+
   if (anyDuplicated(rn)) {
     warning("Detected duplicated gene symbols; collapsing by mean expression.")
     summed <- rowsum(mat, rn)
     counts <- as.numeric(table(rn)[rownames(summed)])
     mat <- sweep(summed, 1, counts, "/")
+    cat(sprintf("Collapsed %d duplicated rows into %d unique gene rows.\n",
+                n_dup_gene_rows, n_dup_gene_names))
   }
   mat
 }
