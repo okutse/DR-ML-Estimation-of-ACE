@@ -128,6 +128,245 @@ create_calibration_data <- function(pred_prob, truth, n_bins = 10) {
   cal_df
 }
 
+#' Compute optimal threshold using Youden's J statistic
+compute_youden_threshold <- function(pred_prob, truth) {
+  tryCatch({
+    roc_obj <- pROC::roc(response = truth, predictor = pred_prob, quiet = TRUE, direction = "<")
+    coords <- pROC::coords(roc_obj, "best", best.method = "youden", ret = c("threshold", "sensitivity", "specificity"))
+    if (is.data.frame(coords)) {
+      # If multiple optimal thresholds, take the first one
+      coords <- coords[1, ]
+    }
+    list(
+      threshold = as.numeric(coords["threshold"]),
+      sensitivity = as.numeric(coords["sensitivity"]),
+      specificity = as.numeric(coords["specificity"]),
+      youden_j = as.numeric(coords["sensitivity"]) + as.numeric(coords["specificity"]) - 1
+    )
+  }, error = function(e) {
+    list(threshold = 0.5, sensitivity = NA_real_, specificity = NA_real_, youden_j = NA_real_)
+  })
+}
+
+#' Compute optimal threshold from PR curve (F1-optimal)
+compute_pr_optimal_threshold <- function(pred_prob, truth) {
+  tryCatch({
+    pred_obj <- ROCR::prediction(pred_prob, truth)
+    perf_pr <- ROCR::performance(pred_obj, "prec", "rec")
+    prec <- perf_pr@y.values[[1]]
+    rec <- perf_pr@x.values[[1]]
+    cutoffs <- pred_obj@cutoffs[[1]]
+    
+    # Compute F1 for each threshold
+    f1 <- 2 * prec * rec / (prec + rec + 1e-10)
+    f1[is.na(f1)] <- 0
+    
+    # Find the threshold with maximum F1
+    best_idx <- which.max(f1)
+    list(
+      threshold = cutoffs[best_idx],
+      precision = prec[best_idx],
+      recall = rec[best_idx],
+      f1 = f1[best_idx]
+    )
+  }, error = function(e) {
+    list(threshold = 0.5, precision = NA_real_, recall = NA_real_, f1 = NA_real_)
+  })
+}
+
+#' Compute classification metrics at a specific threshold
+compute_metrics_at_threshold <- function(pred_prob, truth, threshold, threshold_name = "custom") {
+  pred_class <- ifelse(pred_prob >= threshold, 1, 0)
+  
+  tp <- sum(pred_class == 1 & truth == 1)
+  tn <- sum(pred_class == 0 & truth == 0)
+  fp <- sum(pred_class == 1 & truth == 0)
+  fn <- sum(pred_class == 0 & truth == 1)
+  
+  accuracy <- (tp + tn) / (tp + tn + fp + fn)
+  balanced_accuracy <- ((tp / max(tp + fn, 1)) + (tn / max(tn + fp, 1))) / 2
+  precision <- tp / max(tp + fp, 1)
+  recall <- tp / max(tp + fn, 1)
+  specificity <- tn / max(tn + fp, 1)
+  f1 <- 2 * precision * recall / max(precision + recall, 1e-10)
+  
+  data.frame(
+    threshold_type = threshold_name,
+    threshold = threshold,
+    accuracy = accuracy,
+    balanced_accuracy = balanced_accuracy,
+    precision = precision,
+    recall = recall,
+    sensitivity = recall,
+    specificity = specificity,
+    f1 = f1,
+    tp = tp, tn = tn, fp = fp, fn = fn,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Create confusion matrix visualization
+create_confusion_matrix_plot <- function(pred_prob, truth, threshold, model_name, split_name, threshold_type = "0.5") {
+  pred_class <- ifelse(pred_prob >= threshold, 1, 0)
+  
+  cm <- table(Predicted = factor(pred_class, levels = c(0, 1), labels = c("Early", "Late")),
+              Actual = factor(truth, levels = c(0, 1), labels = c("Early", "Late")))
+  
+  cm_df <- as.data.frame(cm)
+  
+  # Add percentages
+  total <- sum(cm_df$Freq)
+  cm_df$Percentage <- round(cm_df$Freq / total * 100, 1)
+  cm_df$Label <- sprintf("%d\n(%.1f%%)", cm_df$Freq, cm_df$Percentage)
+  
+  ggplot(cm_df, aes(x = Actual, y = Predicted, fill = Freq)) +
+    geom_tile(color = "white", linewidth = 1) +
+    geom_text(aes(label = Label), size = 5, color = "white") +
+    scale_fill_gradient(low = "#3C8DAD", high = "#1F4E5F", name = "Count") +
+    labs(
+      title = sprintf("Confusion Matrix: %s (%s)", model_name, split_name),
+      subtitle = sprintf("Threshold: %.3f (%s)", threshold, threshold_type),
+      x = "Actual Label",
+      y = "Predicted Label"
+    ) +
+    theme_nature() +
+    theme(legend.position = "none") +
+    coord_fixed()
+}
+
+#' Create ROC curve with threshold points
+create_roc_curve_with_thresholds <- function(roc_val, roc_test, youden_val, youden_test, pr_opt_val, pr_opt_test, model_name) {
+  # Extract ROC data
+  roc_val_df <- data.frame(
+    fpr = 1 - roc_val$specificities,
+    tpr = roc_val$sensitivities,
+    split = "Validation"
+  )
+  roc_test_df <- data.frame(
+    fpr = 1 - roc_test$specificities,
+    tpr = roc_test$sensitivities,
+    split = "Test"
+  )
+  roc_data <- dplyr::bind_rows(roc_val_df, roc_test_df)
+  
+  # Threshold points
+  threshold_points <- data.frame(
+    fpr = c(1 - youden_val$specificity, 1 - youden_test$specificity,
+            1 - compute_spec_at_threshold(roc_val, pr_opt_val$threshold),
+            1 - compute_spec_at_threshold(roc_test, pr_opt_test$threshold)),
+    tpr = c(youden_val$sensitivity, youden_test$sensitivity,
+            compute_sens_at_threshold(roc_val, pr_opt_val$threshold),
+            compute_sens_at_threshold(roc_test, pr_opt_test$threshold)),
+    threshold_type = c("Youden", "Youden", "PR-Opt", "PR-Opt"),
+    split = c("Validation", "Test", "Validation", "Test"),
+    threshold = c(youden_val$threshold, youden_test$threshold,
+                  pr_opt_val$threshold, pr_opt_test$threshold)
+  )
+  
+  ggplot(roc_data, aes(x = fpr, y = tpr, color = split)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+    geom_line(linewidth = 1.2, alpha = 0.9) +
+    geom_point(data = threshold_points, aes(shape = threshold_type), size = 4, stroke = 1.5) +
+    scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
+    scale_shape_manual(values = c("Youden" = 17, "PR-Opt" = 15)) +
+    labs(
+      title = sprintf("ROC Curve: %s", model_name),
+      subtitle = sprintf("Val AUC: %.3f | Test AUC: %.3f", as.numeric(roc_val$auc), as.numeric(roc_test$auc)),
+      x = "1 - Specificity (False Positive Rate)",
+      y = "Sensitivity (True Positive Rate)",
+      color = "Split",
+      shape = "Threshold"
+    ) +
+    coord_equal() +
+    theme_nature() +
+    theme(legend.position = "right")
+}
+
+#' Helper to compute sensitivity at a threshold
+compute_sens_at_threshold <- function(roc_obj, threshold) {
+  coords <- pROC::coords(roc_obj, threshold, input = "threshold", ret = "sensitivity")
+  if (is.na(coords) || length(coords) == 0) return(NA_real_)
+  as.numeric(coords)
+}
+
+#' Helper to compute specificity at a threshold
+compute_spec_at_threshold <- function(roc_obj, threshold) {
+  coords <- pROC::coords(roc_obj, threshold, input = "threshold", ret = "specificity")
+  if (is.na(coords) || length(coords) == 0) return(NA_real_)
+  as.numeric(coords)
+}
+
+#' Create PR curve with threshold points
+create_pr_curve_with_thresholds <- function(pred_val, truth_val, pred_test, truth_test, youden_val, youden_test, pr_opt_val, pr_opt_test, model_name) {
+  # Compute PR curves
+  pr_val <- ROCR::prediction(pred_val, truth_val)
+  pr_test <- ROCR::prediction(pred_test, truth_test)
+  
+  perf_val <- ROCR::performance(pr_val, "prec", "rec")
+  perf_test <- ROCR::performance(pr_test, "prec", "rec")
+  
+  pr_val_df <- data.frame(
+    recall = perf_val@x.values[[1]],
+    precision = perf_val@y.values[[1]],
+    split = "Validation"
+  ) %>% dplyr::filter(!is.na(precision))
+  
+  pr_test_df <- data.frame(
+    recall = perf_test@x.values[[1]],
+    precision = perf_test@y.values[[1]],
+    split = "Test"
+  ) %>% dplyr::filter(!is.na(precision))
+  
+  pr_data <- dplyr::bind_rows(pr_val_df, pr_test_df)
+  
+  # Threshold points
+  get_prec_rec_at_threshold <- function(pred, truth, threshold) {
+    pred_class <- ifelse(pred >= threshold, 1, 0)
+    tp <- sum(pred_class == 1 & truth == 1)
+    fp <- sum(pred_class == 1 & truth == 0)
+    fn <- sum(pred_class == 0 & truth == 1)
+    prec <- tp / max(tp + fp, 1)
+    rec <- tp / max(tp + fn, 1)
+    c(precision = prec, recall = rec)
+  }
+  
+  youden_val_pr <- get_prec_rec_at_threshold(pred_val, truth_val, youden_val$threshold)
+  youden_test_pr <- get_prec_rec_at_threshold(pred_test, truth_test, youden_test$threshold)
+  pr_opt_val_pr <- get_prec_rec_at_threshold(pred_val, truth_val, pr_opt_val$threshold)
+  pr_opt_test_pr <- get_prec_rec_at_threshold(pred_test, truth_test, pr_opt_test$threshold)
+  
+  threshold_points <- data.frame(
+    recall = c(youden_val_pr["recall"], youden_test_pr["recall"],
+               pr_opt_val_pr["recall"], pr_opt_test_pr["recall"]),
+    precision = c(youden_val_pr["precision"], youden_test_pr["precision"],
+                  pr_opt_val_pr["precision"], pr_opt_test_pr["precision"]),
+    threshold_type = c("Youden", "Youden", "PR-Opt", "PR-Opt"),
+    split = c("Validation", "Test", "Validation", "Test"),
+    threshold = c(youden_val$threshold, youden_test$threshold,
+                  pr_opt_val$threshold, pr_opt_test$threshold)
+  )
+  
+  # Baseline precision (proportion of positives)
+  baseline <- mean(c(truth_val, truth_test))
+  
+  ggplot(pr_data, aes(x = recall, y = precision, color = split)) +
+    geom_hline(yintercept = baseline, linetype = "dashed", color = "gray50") +
+    geom_line(linewidth = 1.2, alpha = 0.9) +
+    geom_point(data = threshold_points, aes(shape = threshold_type), size = 4, stroke = 1.5) +
+    scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
+    scale_shape_manual(values = c("Youden" = 17, "PR-Opt" = 15)) +
+    labs(
+      title = sprintf("Precision-Recall Curve: %s", model_name),
+      x = "Recall",
+      y = "Precision",
+      color = "Split",
+      shape = "Threshold"
+    ) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+    theme_nature() +
+    theme(legend.position = "right")
+}
+
 #' Compute permutation importance for a model
 compute_permutation_importance <- function(model, X, y, predict_fn, n_permutations = 10, seed = 202501) {
   set.seed(seed)
@@ -467,7 +706,7 @@ dml_partial_linear <- function(Y, D, X, outcome_learner, treatment_learner, K = 
   list(
     theta = theta_hat,
     se = se_hat,
-    ci = c(theta_hat - 1.645 * se_hat, theta_hat + 1.645 * se_hat),
+    ci = c(theta_hat - 1.96 * se_hat, theta_hat + 1.96 * se_hat),
     folds = folds
   )
 }
@@ -519,8 +758,8 @@ bart_dml_partial <- function(Y, D, X, split_label, K = 5, seed = 202501,
     model = "DR-BART",
     theta = theta_hat,
     se = se_hat,
-    ci_lower = theta_hat - 1.645 * se_hat,
-    ci_upper = theta_hat + 1.645 * se_hat
+    ci_lower = theta_hat - 1.96 * se_hat,
+    ci_upper = theta_hat + 1.96 * se_hat
   )
 }
 
@@ -716,8 +955,16 @@ exp_mat <- exp_mat[complete.cases(exp_mat), , drop = FALSE]
 ## Nested CV split before preprocessing using stratification by tumor stage + covariates
 sample_ids <- colnames(exp_mat)
 n_total <- length(sample_ids)
-K_outer <- 5
-K_inner <- 5
+K_outer <- 10
+K_inner <- 9
+# With the current fold construction (inner folds drawn from remaining outer folds),
+# K_inner cannot exceed K_outer - 1.
+if (K_inner > (K_outer - 1)) {
+  stop(sprintf(
+    "K_inner (%d) must be <= K_outer - 1 (%d) with the current fold construction.",
+    K_inner, K_outer - 1
+  ))
+}
 # strata_vars <- c("tumor_stage", "cancer_type_detailed", "er_status")
 # strata_vars <- c("tumor_stage", "er_status")
 strata_vars <- c("tumor_stage")
@@ -733,6 +980,12 @@ strata <- dt2$tumor_stage[match(sample_ids, dt2$patient_id)]
 cv_folds <- create_stratified_folds_ids2(sample_ids, strata, k = K_outer, seed = 202501)
 
 sapply(cv_folds, length)
+
+total_fold_configs <- K_outer * K_inner
+cat(sprintf(
+  "Nested CV config: K_outer=%d, K_inner=%d (total fold configs: %d)\n",
+  K_outer, K_inner, total_fold_configs
+))
 
 collapse_duplicate_genes <- function(mat) {
   rn <- rownames(mat)
@@ -1818,6 +2071,93 @@ run_fold <- function(train_ids, val_ids, test_ids, fold_label, results_dir, gsva
   
   write.csv(comprehensive_metrics, file.path(results_dir, "comprehensive_test_metrics.csv"), row.names = FALSE)
   
+  #################################################################################
+  # Optimal Threshold Analysis (Youden's J and PR-optimal)
+  #################################################################################
+  
+  # Compute validation predictions (needed for threshold optimization)
+  cal_val_glmnet_early <- apply_imputer(val_df, cov_imputer_trainval)
+  X_val_cov_early <- model.matrix(cov_formula, data = cal_val_glmnet_early)
+  X_val_full_early <- cbind(pathway_score = val_df$pathway_score, X_val_cov_early)
+  glmnet_val_pred_early <- as.numeric(stats::predict(glmnet_classifier, newx = X_val_full_early, s = "lambda.min", type = "response"))
+  
+  rf_val_df_early <- apply_imputer(val_df, rf_imputer)
+  rf_val_pred_mat_early <- predict(rf_classifier, data = rf_val_df_early)$predictions
+  rf_val_pred_early <- if (is.matrix(rf_val_pred_mat_early)) as.numeric(rf_val_pred_mat_early[, "1"]) else as.numeric(rf_val_pred_mat_early)
+  
+  bart_val_pred_early <- as.numeric(stats::predict(bart_fit, newdata = X_val_full_early)$prob.test.mean)
+  
+  # Compute optimal thresholds for each model using validation set
+  # GLMNET thresholds
+  glmnet_youden_val <- compute_youden_threshold(glmnet_val_pred_early, val_df$tumor_stage_binary)
+  glmnet_pr_opt_val <- compute_pr_optimal_threshold(glmnet_val_pred_early, val_df$tumor_stage_binary)
+  glmnet_youden_test <- compute_youden_threshold(glmnet_test_pred, test_df$tumor_stage_binary)
+  glmnet_pr_opt_test <- compute_pr_optimal_threshold(glmnet_test_pred, test_df$tumor_stage_binary)
+  
+  # RF thresholds
+  rf_youden_val <- compute_youden_threshold(rf_val_pred_early, val_df$tumor_stage_binary)
+  rf_pr_opt_val <- compute_pr_optimal_threshold(rf_val_pred_early, val_df$tumor_stage_binary)
+  rf_youden_test <- compute_youden_threshold(rf_test_pred, test_df$tumor_stage_binary)
+  rf_pr_opt_test <- compute_pr_optimal_threshold(rf_test_pred, test_df$tumor_stage_binary)
+  
+  # BART thresholds
+  bart_youden_val <- compute_youden_threshold(bart_val_pred_early, val_df$tumor_stage_binary)
+  bart_pr_opt_val <- compute_pr_optimal_threshold(bart_val_pred_early, val_df$tumor_stage_binary)
+  bart_youden_test <- compute_youden_threshold(bart_test_pred, test_df$tumor_stage_binary)
+  bart_pr_opt_test <- compute_pr_optimal_threshold(bart_test_pred, test_df$tumor_stage_binary)
+  
+  # Compute metrics at each threshold for validation set
+  val_metrics_all_thresholds <- dplyr::bind_rows(
+    # Standard 0.5 threshold
+    compute_metrics_at_threshold(glmnet_val_pred_early, val_df$tumor_stage_binary, 0.5, "Standard (0.5)") %>% dplyr::mutate(model = "DR-GLMNET", split = "Validation"),
+    compute_metrics_at_threshold(rf_val_pred_early, val_df$tumor_stage_binary, 0.5, "Standard (0.5)") %>% dplyr::mutate(model = "DR-RF", split = "Validation"),
+    compute_metrics_at_threshold(bart_val_pred_early, val_df$tumor_stage_binary, 0.5, "Standard (0.5)") %>% dplyr::mutate(model = "DR-BART", split = "Validation"),
+    # Youden's J threshold
+    compute_metrics_at_threshold(glmnet_val_pred_early, val_df$tumor_stage_binary, glmnet_youden_val$threshold, "Youden") %>% dplyr::mutate(model = "DR-GLMNET", split = "Validation"),
+    compute_metrics_at_threshold(rf_val_pred_early, val_df$tumor_stage_binary, rf_youden_val$threshold, "Youden") %>% dplyr::mutate(model = "DR-RF", split = "Validation"),
+    compute_metrics_at_threshold(bart_val_pred_early, val_df$tumor_stage_binary, bart_youden_val$threshold, "Youden") %>% dplyr::mutate(model = "DR-BART", split = "Validation"),
+    # PR-optimal (F1-optimal) threshold
+    compute_metrics_at_threshold(glmnet_val_pred_early, val_df$tumor_stage_binary, glmnet_pr_opt_val$threshold, "PR-Optimal") %>% dplyr::mutate(model = "DR-GLMNET", split = "Validation"),
+    compute_metrics_at_threshold(rf_val_pred_early, val_df$tumor_stage_binary, rf_pr_opt_val$threshold, "PR-Optimal") %>% dplyr::mutate(model = "DR-RF", split = "Validation"),
+    compute_metrics_at_threshold(bart_val_pred_early, val_df$tumor_stage_binary, bart_pr_opt_val$threshold, "PR-Optimal") %>% dplyr::mutate(model = "DR-BART", split = "Validation")
+  )
+  
+  # Compute metrics at each threshold for test set
+  test_metrics_all_thresholds <- dplyr::bind_rows(
+    # Standard 0.5 threshold
+    compute_metrics_at_threshold(glmnet_test_pred, test_df$tumor_stage_binary, 0.5, "Standard (0.5)") %>% dplyr::mutate(model = "DR-GLMNET", split = "Test"),
+    compute_metrics_at_threshold(rf_test_pred, test_df$tumor_stage_binary, 0.5, "Standard (0.5)") %>% dplyr::mutate(model = "DR-RF", split = "Test"),
+    compute_metrics_at_threshold(bart_test_pred, test_df$tumor_stage_binary, 0.5, "Standard (0.5)") %>% dplyr::mutate(model = "DR-BART", split = "Test"),
+    # Youden's J threshold (using val-optimized threshold)
+    compute_metrics_at_threshold(glmnet_test_pred, test_df$tumor_stage_binary, glmnet_youden_val$threshold, "Youden (Val-tuned)") %>% dplyr::mutate(model = "DR-GLMNET", split = "Test"),
+    compute_metrics_at_threshold(rf_test_pred, test_df$tumor_stage_binary, rf_youden_val$threshold, "Youden (Val-tuned)") %>% dplyr::mutate(model = "DR-RF", split = "Test"),
+    compute_metrics_at_threshold(bart_test_pred, test_df$tumor_stage_binary, bart_youden_val$threshold, "Youden (Val-tuned)") %>% dplyr::mutate(model = "DR-BART", split = "Test"),
+    # PR-optimal threshold (using val-optimized threshold)
+    compute_metrics_at_threshold(glmnet_test_pred, test_df$tumor_stage_binary, glmnet_pr_opt_val$threshold, "PR-Optimal (Val-tuned)") %>% dplyr::mutate(model = "DR-GLMNET", split = "Test"),
+    compute_metrics_at_threshold(rf_test_pred, test_df$tumor_stage_binary, rf_pr_opt_val$threshold, "PR-Optimal (Val-tuned)") %>% dplyr::mutate(model = "DR-RF", split = "Test"),
+    compute_metrics_at_threshold(bart_test_pred, test_df$tumor_stage_binary, bart_pr_opt_val$threshold, "PR-Optimal (Val-tuned)") %>% dplyr::mutate(model = "DR-BART", split = "Test"),
+    # Test-set optimal thresholds (oracle, for reference only)
+    compute_metrics_at_threshold(glmnet_test_pred, test_df$tumor_stage_binary, glmnet_youden_test$threshold, "Youden (Test-Oracle)") %>% dplyr::mutate(model = "DR-GLMNET", split = "Test"),
+    compute_metrics_at_threshold(rf_test_pred, test_df$tumor_stage_binary, rf_youden_test$threshold, "Youden (Test-Oracle)") %>% dplyr::mutate(model = "DR-RF", split = "Test"),
+    compute_metrics_at_threshold(bart_test_pred, test_df$tumor_stage_binary, bart_youden_test$threshold, "Youden (Test-Oracle)") %>% dplyr::mutate(model = "DR-BART", split = "Test")
+  )
+  
+  all_threshold_metrics <- dplyr::bind_rows(val_metrics_all_thresholds, test_metrics_all_thresholds)
+  write.csv(all_threshold_metrics, file.path(results_dir, "metrics_by_threshold.csv"), row.names = FALSE)
+  
+  # Save threshold summary
+  threshold_summary <- data.frame(
+    model = rep(c("DR-GLMNET", "DR-RF", "DR-BART"), each = 4),
+    threshold_type = rep(c("Youden-Val", "Youden-Test", "PR-Opt-Val", "PR-Opt-Test"), 3),
+    threshold = c(
+      glmnet_youden_val$threshold, glmnet_youden_test$threshold, glmnet_pr_opt_val$threshold, glmnet_pr_opt_test$threshold,
+      rf_youden_val$threshold, rf_youden_test$threshold, rf_pr_opt_val$threshold, rf_pr_opt_test$threshold,
+      bart_youden_val$threshold, bart_youden_test$threshold, bart_pr_opt_val$threshold, bart_pr_opt_test$threshold
+    ),
+    stringsAsFactors = FALSE
+  )
+  write.csv(threshold_summary, file.path(results_dir, "optimal_thresholds.csv"), row.names = FALSE)
+  
   # Store predictions for later visualization
   test_predictions <- data.frame(
     patient_id = test_df$patient_id,
@@ -1828,7 +2168,20 @@ run_fold <- function(train_ids, val_ids, test_ids, fold_label, results_dir, gsva
     fold_label = fold_label,
     stringsAsFactors = FALSE
   )
+  
+  # Add validation predictions
+  val_predictions <- data.frame(
+    patient_id = val_df$patient_id,
+    true_label = val_df$tumor_stage_binary,
+    glmnet_pred = glmnet_val_pred_early,
+    rf_pred = rf_val_pred_early,
+    bart_pred = bart_val_pred_early,
+    fold_label = fold_label,
+    stringsAsFactors = FALSE
+  )
+  
   write.csv(test_predictions, file.path(results_dir, "test_predictions.csv"), row.names = FALSE)
+  write.csv(val_predictions, file.path(results_dir, "val_predictions.csv"), row.names = FALSE)
   
   #################################################################################
   # GSVA Score Ridge Plots (Train/Val/Test)
@@ -1875,7 +2228,7 @@ run_fold <- function(train_ids, val_ids, test_ids, fold_label, results_dir, gsva
   rf_val_pred_mat <- predict(rf_classifier, data = rf_val_df)$predictions
   rf_val_pred <- if (is.matrix(rf_val_pred_mat)) as.numeric(rf_val_pred_mat[, "1"]) else as.numeric(rf_val_pred_mat)
   
-  bart_val_pred <- as.numeric(BART::predict.pbart(bart_fit, newdata = X_val_full)$prob.test.mean)
+  bart_val_pred <- as.numeric(stats::predict(bart_fit, newdata = X_val_full)$prob.test.mean)
   
   # Create calibration data
   cal_test_data <- dplyr::bind_rows(
@@ -2008,6 +2361,222 @@ run_fold <- function(train_ids, val_ids, test_ids, fold_label, results_dir, gsva
   
   ggsave(filename = file.path(results_dir, "[h]roc_curves_val.png"), plot = roc_plot_val, width = 8, height = 7, dpi = 600)
   
+  #################################################################################
+  # Combined ROC Curves: All 3 Models on Same Plot (Val + Test)
+  #################################################################################
+  combined_roc_plot <- ggplot(roc_data, aes(x = 1 - specificity, y = sensitivity, color = model, linetype = split)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+    geom_line(linewidth = 1.0, alpha = 0.9) +
+    scale_color_manual(values = c("DR-GLMNET" = "#E41A1C", "DR-RF" = "#377EB8", "DR-BART" = "#4DAF4A")) +
+    scale_linetype_manual(values = c("Validation" = "dashed", "Test" = "solid")) +
+    labs(
+      title = sprintf("ROC Curves: All Models (%s)", fold_label),
+      subtitle = sprintf("Test AUC - GLMNET: %.3f, RF: %.3f, BART: %.3f",
+                        as.numeric(roc_glmnet_test$auc), as.numeric(roc_rf_test$auc), as.numeric(roc_bart_test$auc)),
+      x = "1 - Specificity (False Positive Rate)",
+      y = "Sensitivity (True Positive Rate)",
+      color = "Model",
+      linetype = "Split"
+    ) +
+    coord_equal() +
+    theme_nature()
+  
+  ggsave(filename = file.path(results_dir, "[h2]roc_curves_combined_3models.png"), plot = combined_roc_plot, width = 10, height = 8, dpi = 600)
+  
+  #################################################################################
+  # PR Curves for All Models
+  #################################################################################
+  pr_to_df <- function(pred, truth, model_name, split_name) {
+    pr_obj <- ROCR::prediction(pred, truth)
+    perf <- ROCR::performance(pr_obj, "prec", "rec")
+    prauc <- tryCatch({
+      as.numeric(ROCR::performance(pr_obj, "aucpr")@y.values[[1]])
+    }, error = function(e) NA_real_)
+    
+    data.frame(
+      recall = perf@x.values[[1]],
+      precision = perf@y.values[[1]],
+      model = model_name,
+      split = split_name,
+      pr_auc = prauc,
+      stringsAsFactors = FALSE
+    ) %>% dplyr::filter(!is.na(precision))
+  }
+  
+  pr_data <- dplyr::bind_rows(
+    pr_to_df(glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET", "Test"),
+    pr_to_df(rf_test_pred, test_df$tumor_stage_binary, "DR-RF", "Test"),
+    pr_to_df(bart_test_pred, test_df$tumor_stage_binary, "DR-BART", "Test"),
+    pr_to_df(glmnet_val_pred, val_df$tumor_stage_binary, "DR-GLMNET", "Validation"),
+    pr_to_df(rf_val_pred, val_df$tumor_stage_binary, "DR-RF", "Validation"),
+    pr_to_df(bart_val_pred, val_df$tumor_stage_binary, "DR-BART", "Validation")
+  )
+  
+  # Baseline for PR curve
+  baseline_precision <- mean(test_df$tumor_stage_binary)
+  
+  # Get PR-AUC for each model
+  pr_aucs <- pr_data %>% dplyr::group_by(model, split) %>% dplyr::summarise(pr_auc = first(pr_auc), .groups = "drop")
+  
+  combined_pr_plot <- ggplot(pr_data, aes(x = recall, y = precision, color = model, linetype = split)) +
+    geom_hline(yintercept = baseline_precision, linetype = "dotted", color = "gray50") +
+    geom_line(linewidth = 1.0, alpha = 0.9) +
+    scale_color_manual(values = c("DR-GLMNET" = "#E41A1C", "DR-RF" = "#377EB8", "DR-BART" = "#4DAF4A")) +
+    scale_linetype_manual(values = c("Validation" = "dashed", "Test" = "solid")) +
+    labs(
+      title = sprintf("Precision-Recall Curves: All Models (%s)", fold_label),
+      subtitle = sprintf("Test PR-AUC - GLMNET: %.3f, RF: %.3f, BART: %.3f",
+                        pr_aucs %>% dplyr::filter(model == "DR-GLMNET", split == "Test") %>% dplyr::pull(pr_auc),
+                        pr_aucs %>% dplyr::filter(model == "DR-RF", split == "Test") %>% dplyr::pull(pr_auc),
+                        pr_aucs %>% dplyr::filter(model == "DR-BART", split == "Test") %>% dplyr::pull(pr_auc)),
+      x = "Recall",
+      y = "Precision",
+      color = "Model",
+      linetype = "Split"
+    ) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+    theme_nature()
+  
+  ggsave(filename = file.path(results_dir, "[h3]pr_curves_combined_3models.png"), plot = combined_pr_plot, width = 10, height = 8, dpi = 600)
+  
+  #################################################################################
+  # Per-Model ROC Curves with Val/Test + Threshold Points
+  #################################################################################
+  
+  # Helper to create single model ROC plot with thresholds
+  create_single_model_roc_with_thresholds <- function(roc_val, roc_test, youden_val, youden_test, pr_opt_val, pr_opt_test, model_name) {
+    roc_val_df <- data.frame(fpr = 1 - roc_val$specificities, tpr = roc_val$sensitivities, split = "Validation")
+    roc_test_df <- data.frame(fpr = 1 - roc_test$specificities, tpr = roc_test$sensitivities, split = "Test")
+    roc_combined <- dplyr::bind_rows(roc_val_df, roc_test_df)
+    
+    # Get coordinates for threshold points
+    get_roc_coords <- function(roc_obj, threshold) {
+      coords <- tryCatch({
+        pROC::coords(roc_obj, threshold, input = "threshold", ret = c("sensitivity", "specificity"))
+      }, error = function(e) c(sensitivity = NA, specificity = NA))
+      c(fpr = 1 - as.numeric(coords["specificity"]), tpr = as.numeric(coords["sensitivity"]))
+    }
+    
+    threshold_points <- data.frame(
+      fpr = c(get_roc_coords(roc_val, youden_val$threshold)["fpr"],
+              get_roc_coords(roc_test, youden_val$threshold)["fpr"],  # Apply val threshold to test
+              get_roc_coords(roc_val, pr_opt_val$threshold)["fpr"],
+              get_roc_coords(roc_test, pr_opt_val$threshold)["fpr"]),
+      tpr = c(get_roc_coords(roc_val, youden_val$threshold)["tpr"],
+              get_roc_coords(roc_test, youden_val$threshold)["tpr"],
+              get_roc_coords(roc_val, pr_opt_val$threshold)["tpr"],
+              get_roc_coords(roc_test, pr_opt_val$threshold)["tpr"]),
+      threshold_type = c("Youden", "Youden", "PR-Opt", "PR-Opt"),
+      split = c("Validation", "Test", "Validation", "Test"),
+      threshold = c(youden_val$threshold, youden_val$threshold, pr_opt_val$threshold, pr_opt_val$threshold)
+    )
+    
+    ggplot(roc_combined, aes(x = fpr, y = tpr, color = split)) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+      geom_line(linewidth = 1.2, alpha = 0.9) +
+      geom_point(data = threshold_points, aes(shape = threshold_type), size = 4, stroke = 1.5) +
+      scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
+      scale_shape_manual(values = c("Youden" = 17, "PR-Opt" = 15)) +
+      labs(
+        title = sprintf("ROC Curve with Threshold Points: %s", model_name),
+        subtitle = sprintf("Val AUC: %.3f | Test AUC: %.3f | Youden thresh: %.3f | PR-Opt thresh: %.3f",
+                          as.numeric(roc_val$auc), as.numeric(roc_test$auc), youden_val$threshold, pr_opt_val$threshold),
+        x = "1 - Specificity (False Positive Rate)",
+        y = "Sensitivity (True Positive Rate)",
+        color = "Split",
+        shape = "Threshold"
+      ) +
+      coord_equal() +
+      theme_nature()
+  }
+  
+  # Create per-model ROC plots with thresholds
+  glmnet_roc_thresh <- create_single_model_roc_with_thresholds(
+    roc_glmnet_val, roc_glmnet_test, glmnet_youden_val, glmnet_youden_test, glmnet_pr_opt_val, glmnet_pr_opt_test, "DR-GLMNET")
+  rf_roc_thresh <- create_single_model_roc_with_thresholds(
+    roc_rf_val, roc_rf_test, rf_youden_val, rf_youden_test, rf_pr_opt_val, rf_pr_opt_test, "DR-RF")
+  bart_roc_thresh <- create_single_model_roc_with_thresholds(
+    roc_bart_val, roc_bart_test, bart_youden_val, bart_youden_test, bart_pr_opt_val, bart_pr_opt_test, "DR-BART")
+  
+  ggsave(filename = file.path(results_dir, "[h4]roc_glmnet_with_thresholds.png"), plot = glmnet_roc_thresh, width = 9, height = 7, dpi = 600)
+  ggsave(filename = file.path(results_dir, "[h4]roc_rf_with_thresholds.png"), plot = rf_roc_thresh, width = 9, height = 7, dpi = 600)
+  ggsave(filename = file.path(results_dir, "[h4]roc_bart_with_thresholds.png"), plot = bart_roc_thresh, width = 9, height = 7, dpi = 600)
+  
+  #################################################################################
+  # Per-Model PR Curves with Val/Test + Threshold Points
+  #################################################################################
+  
+  create_single_model_pr_with_thresholds <- function(pred_val, truth_val, pred_test, truth_test, 
+                                                      youden_val, pr_opt_val, model_name) {
+    pr_val_obj <- ROCR::prediction(pred_val, truth_val)
+    pr_test_obj <- ROCR::prediction(pred_test, truth_test)
+    
+    perf_val <- ROCR::performance(pr_val_obj, "prec", "rec")
+    perf_test <- ROCR::performance(pr_test_obj, "prec", "rec")
+    
+    prauc_val <- tryCatch(as.numeric(ROCR::performance(pr_val_obj, "aucpr")@y.values[[1]]), error = function(e) NA)
+    prauc_test <- tryCatch(as.numeric(ROCR::performance(pr_test_obj, "aucpr")@y.values[[1]]), error = function(e) NA)
+    
+    pr_val_df <- data.frame(recall = perf_val@x.values[[1]], precision = perf_val@y.values[[1]], split = "Validation") %>% dplyr::filter(!is.na(precision))
+    pr_test_df <- data.frame(recall = perf_test@x.values[[1]], precision = perf_test@y.values[[1]], split = "Test") %>% dplyr::filter(!is.na(precision))
+    pr_combined <- dplyr::bind_rows(pr_val_df, pr_test_df)
+    
+    # Get precision/recall at thresholds
+    get_pr_at_thresh <- function(pred, truth, thresh) {
+      pred_class <- ifelse(pred >= thresh, 1, 0)
+      tp <- sum(pred_class == 1 & truth == 1)
+      fp <- sum(pred_class == 1 & truth == 0)
+      fn <- sum(pred_class == 0 & truth == 1)
+      c(precision = tp / max(tp + fp, 1), recall = tp / max(tp + fn, 1))
+    }
+    
+    threshold_points <- data.frame(
+      recall = c(get_pr_at_thresh(pred_val, truth_val, youden_val$threshold)["recall"],
+                 get_pr_at_thresh(pred_test, truth_test, youden_val$threshold)["recall"],
+                 get_pr_at_thresh(pred_val, truth_val, pr_opt_val$threshold)["recall"],
+                 get_pr_at_thresh(pred_test, truth_test, pr_opt_val$threshold)["recall"]),
+      precision = c(get_pr_at_thresh(pred_val, truth_val, youden_val$threshold)["precision"],
+                    get_pr_at_thresh(pred_test, truth_test, youden_val$threshold)["precision"],
+                    get_pr_at_thresh(pred_val, truth_val, pr_opt_val$threshold)["precision"],
+                    get_pr_at_thresh(pred_test, truth_test, pr_opt_val$threshold)["precision"]),
+      threshold_type = c("Youden", "Youden", "PR-Opt", "PR-Opt"),
+      split = c("Validation", "Test", "Validation", "Test")
+    )
+    
+    baseline <- mean(c(truth_val, truth_test))
+    
+    ggplot(pr_combined, aes(x = recall, y = precision, color = split)) +
+      geom_hline(yintercept = baseline, linetype = "dotted", color = "gray50") +
+      geom_line(linewidth = 1.2, alpha = 0.9) +
+      geom_point(data = threshold_points, aes(shape = threshold_type), size = 4, stroke = 1.5) +
+      scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
+      scale_shape_manual(values = c("Youden" = 17, "PR-Opt" = 15)) +
+      labs(
+        title = sprintf("PR Curve with Threshold Points: %s", model_name),
+        subtitle = sprintf("Val PR-AUC: %.3f | Test PR-AUC: %.3f", prauc_val, prauc_test),
+        x = "Recall",
+        y = "Precision",
+        color = "Split",
+        shape = "Threshold"
+      ) +
+      coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+      theme_nature()
+  }
+  
+  glmnet_pr_thresh <- create_single_model_pr_with_thresholds(
+    glmnet_val_pred, val_df$tumor_stage_binary, glmnet_test_pred, test_df$tumor_stage_binary, 
+    glmnet_youden_val, glmnet_pr_opt_val, "DR-GLMNET")
+  rf_pr_thresh <- create_single_model_pr_with_thresholds(
+    rf_val_pred, val_df$tumor_stage_binary, rf_test_pred, test_df$tumor_stage_binary,
+    rf_youden_val, rf_pr_opt_val, "DR-RF")
+  bart_pr_thresh <- create_single_model_pr_with_thresholds(
+    bart_val_pred, val_df$tumor_stage_binary, bart_test_pred, test_df$tumor_stage_binary,
+    bart_youden_val, bart_pr_opt_val, "DR-BART")
+  
+  ggsave(filename = file.path(results_dir, "[h5]pr_glmnet_with_thresholds.png"), plot = glmnet_pr_thresh, width = 9, height = 7, dpi = 600)
+  ggsave(filename = file.path(results_dir, "[h5]pr_rf_with_thresholds.png"), plot = rf_pr_thresh, width = 9, height = 7, dpi = 600)
+  ggsave(filename = file.path(results_dir, "[h5]pr_bart_with_thresholds.png"), plot = bart_pr_thresh, width = 9, height = 7, dpi = 600)
+
   #################################################################################
   # Predicted vs True Visualization (Test Set)
   #################################################################################
@@ -2222,6 +2791,100 @@ run_fold <- function(train_ids, val_ids, test_ids, fold_label, results_dir, gsva
   message(sprintf("Selected model for reporting (based on test AUC): %s", best_model))
   print(best_effect)
   
+  #################################################################################
+  # Confusion Matrix for Best Model (at different thresholds)
+  #################################################################################
+  
+  # Get predictions for best model
+  best_test_pred <- switch(best_model,
+    "DR-GLMNET" = glmnet_test_pred,
+    "DR-RF" = rf_test_pred,
+    "DR-BART" = bart_test_pred
+  )
+  best_val_pred <- switch(best_model,
+    "DR-GLMNET" = glmnet_val_pred,
+    "DR-RF" = rf_val_pred,
+    "DR-BART" = bart_val_pred
+  )
+  best_youden <- switch(best_model,
+    "DR-GLMNET" = glmnet_youden_val,
+    "DR-RF" = rf_youden_val,
+    "DR-BART" = bart_youden_val
+  )
+  best_pr_opt <- switch(best_model,
+    "DR-GLMNET" = glmnet_pr_opt_val,
+    "DR-RF" = rf_pr_opt_val,
+    "DR-BART" = bart_pr_opt_val
+  )
+  
+  # Confusion matrix at standard threshold (0.5)
+  cm_standard <- create_confusion_matrix_plot(best_test_pred, test_df$tumor_stage_binary, 0.5, best_model, "Test", "Standard")
+  ggsave(filename = file.path(results_dir, "[m1]confusion_matrix_best_model_standard.png"), plot = cm_standard, width = 6, height = 5, dpi = 600)
+  
+  # Confusion matrix at Youden's J threshold
+  cm_youden <- create_confusion_matrix_plot(best_test_pred, test_df$tumor_stage_binary, best_youden$threshold, best_model, "Test", sprintf("Youden (%.3f)", best_youden$threshold))
+  ggsave(filename = file.path(results_dir, "[m2]confusion_matrix_best_model_youden.png"), plot = cm_youden, width = 6, height = 5, dpi = 600)
+  
+  # Confusion matrix at PR-optimal threshold
+  cm_pr_opt <- create_confusion_matrix_plot(best_test_pred, test_df$tumor_stage_binary, best_pr_opt$threshold, best_model, "Test", sprintf("PR-Opt (%.3f)", best_pr_opt$threshold))
+  ggsave(filename = file.path(results_dir, "[m3]confusion_matrix_best_model_pr_opt.png"), plot = cm_pr_opt, width = 6, height = 5, dpi = 600)
+  
+  #################################################################################
+  # Reliability Diagram (Calibration Plot) for Best Model
+  #################################################################################
+  
+  best_cal_test <- create_calibration_data(best_test_pred, test_df$tumor_stage_binary, n_bins = 10)
+  best_cal_val <- create_calibration_data(best_val_pred, val_df$tumor_stage_binary, n_bins = 10)
+  
+  best_cal_data <- dplyr::bind_rows(
+    best_cal_test %>% dplyr::mutate(split = "Test"),
+    best_cal_val %>% dplyr::mutate(split = "Validation")
+  )
+  
+  reliability_diagram <- ggplot(best_cal_data, aes(x = mean_pred, y = mean_obs, color = split)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50", linewidth = 1) +
+    geom_point(aes(size = n), alpha = 0.8) +
+    geom_errorbar(aes(ymin = pmax(0, mean_obs - 1.96 * se), ymax = pmin(1, mean_obs + 1.96 * se)), width = 0.02, alpha = 0.6) +
+    geom_line(alpha = 0.7, linewidth = 1) +
+    scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
+    scale_size_continuous(range = c(2, 8), name = "N obs") +
+    labs(
+      title = sprintf("Reliability Diagram: %s", best_model),
+      subtitle = "Calibration of predicted probabilities (95% CI)",
+      x = "Mean Predicted Probability",
+      y = "Observed Proportion (Actual Late Stage)",
+      color = "Split"
+    ) +
+    coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+    theme_nature()
+  
+  ggsave(filename = file.path(results_dir, "[n]reliability_diagram_best_model.png"), plot = reliability_diagram, width = 8, height = 7, dpi = 600)
+  
+  # Add histogram of predictions for calibration context
+  pred_histogram_data <- data.frame(
+    pred = c(best_val_pred, best_test_pred),
+    split = c(rep("Validation", length(best_val_pred)), rep("Test", length(best_test_pred))),
+    true_label = c(val_df$tumor_stage_binary, test_df$tumor_stage_binary)
+  )
+  
+  pred_histogram <- ggplot(pred_histogram_data, aes(x = pred, fill = factor(true_label))) +
+    geom_histogram(bins = 30, alpha = 0.7, position = "identity") +
+    facet_wrap(~ split, ncol = 2) +
+    scale_fill_manual(values = c("0" = "#63A375", "1" = "#E4572E"), labels = c("Early", "Late"), name = "True Stage") +
+    geom_vline(xintercept = 0.5, linetype = "dashed", color = "black") +
+    geom_vline(xintercept = best_youden$threshold, linetype = "dotted", color = "blue", linewidth = 0.8) +
+    geom_vline(xintercept = best_pr_opt$threshold, linetype = "dotdash", color = "purple", linewidth = 0.8) +
+    labs(
+      title = sprintf("Prediction Distribution: %s", best_model),
+      subtitle = sprintf("Thresholds: 0.5 (black), Youden %.3f (blue), PR-Opt %.3f (purple)",
+                        best_youden$threshold, best_pr_opt$threshold),
+      x = "Predicted Probability",
+      y = "Count"
+    ) +
+    theme_nature()
+  
+  ggsave(filename = file.path(results_dir, "[n2]prediction_distribution_best_model.png"), plot = pred_histogram, width = 10, height = 5, dpi = 600)
+  
   
   #################################################################################
   # Sensitivity analysis: remove genomic covariates ----
@@ -2294,25 +2957,62 @@ run_fold <- function(train_ids, val_ids, test_ids, fold_label, results_dir, gsva
       dml_split_tbl = dml_split_tbl,
       model_metrics = model_metrics,
       comprehensive_metrics = comprehensive_metrics,
+      all_threshold_metrics = all_threshold_metrics,
       test_predictions = test_predictions,
+      val_predictions = val_predictions,
+      best_model = best_model,
       best_effect = best_effect,
-      clinical_sensitivity_tbl = clinical_sensitivity_tbl
+      clinical_sensitivity_tbl = clinical_sensitivity_tbl,
+      threshold_summary = threshold_summary,
+      roc_auc_test = c("DR-GLMNET" = as.numeric(roc_glmnet_test$auc), 
+                       "DR-RF" = as.numeric(roc_rf_test$auc), 
+                       "DR-BART" = as.numeric(roc_bart_test$auc)),
+      roc_auc_val = c("DR-GLMNET" = as.numeric(roc_glmnet_val$auc), 
+                      "DR-RF" = as.numeric(roc_rf_val$auc), 
+                      "DR-BART" = as.numeric(roc_bart_val$auc)),
+      pr_auc_test = setNames(
+        sapply(list(glmnet_test_pred, rf_test_pred, bart_test_pred), function(p) {
+          tryCatch(as.numeric(ROCR::performance(ROCR::prediction(p, test_df$tumor_stage_binary), "aucpr")@y.values[[1]]), error = function(e) NA)
+        }),
+        c("DR-GLMNET", "DR-RF", "DR-BART")
+      ),
+      pr_auc_val = setNames(
+        sapply(list(glmnet_val_pred, rf_val_pred, bart_val_pred), function(p) {
+          tryCatch(as.numeric(ROCR::performance(ROCR::prediction(p, val_df$tumor_stage_binary), "aucpr")@y.values[[1]]), error = function(e) NA)
+        }),
+        c("DR-GLMNET", "DR-RF", "DR-BART")
+      )
     )
 }
 
-dir.create("results", showWarnings = FALSE)
+dir.create("results", "final_results", showWarnings = FALSE)
 
 #################################################################################
 # Phase 1: Collect top pathways from all folds for unified pathway selection
 #################################################################################
 
 cat("\n=== Phase 1: Collecting top pathways from all folds ===\n\n")
+cat(sprintf(
+  "Outer folds: %d | Inner folds per outer: %d | Total configs: %d\n",
+  K_outer, K_inner, total_fold_configs
+))
 
 all_top_pathways <- list()
 pathway_collection_errors <- list()
 
+get_inner_folds_for_outer <- function(outer_fold, k_outer, k_inner) {
+  remaining <- setdiff(seq_len(k_outer), outer_fold)
+  if (k_inner > length(remaining)) {
+    stop(sprintf(
+      "K_inner (%d) exceeds available folds (%d) for outer fold %d.",
+      k_inner, length(remaining), outer_fold
+    ))
+  }
+  remaining[seq_len(k_inner)]
+}
+
 for (outer_fold in seq_len(K_outer)) {
-  inner_folds <- setdiff(seq_len(K_outer), outer_fold)
+  inner_folds <- get_inner_folds_for_outer(outer_fold, K_outer, K_inner)
   
   for (inner_fold in inner_folds) {
     train_folds <- setdiff(seq_len(K_outer), c(outer_fold, inner_fold))
@@ -2350,32 +3050,48 @@ if (length(pathway_collection_errors)) {
   print(pathway_collection_errors)
 }
 
-# Perform unweighted voting to select unified pathway
-cat("\n=== Performing unweighted voting for unified pathway ===\n\n")
+# Perform rank-weighted voting to select unified pathway
+cat("\n=== Performing rank-weighted voting for unified pathway ===\n\n")
 
 if (length(all_top_pathways) == 0) {
   stop("No pathways were collected from any fold. Cannot proceed.")
 }
 
-# Collect all top pathways and count their occurrences
-pathway_votes <- table(unlist(lapply(all_top_pathways, function(x) x$top_pathways)))
-pathway_votes_df <- data.frame(
-  pathway = names(pathway_votes),
-  votes = as.numeric(pathway_votes),
-  stringsAsFactors = FALSE
-) %>%
-  dplyr::arrange(dplyr::desc(votes))
+# Collect all top pathways with fold-specific ranks
+all_pathways_by_fold <- lapply(names(all_top_pathways), function(fold_label) {
+  top_paths <- all_top_pathways[[fold_label]]$top_pathways
+  data.frame(
+    fold = fold_label,
+    pathway = top_paths,
+    rank = seq_along(top_paths),
+    max_rank = length(top_paths),
+    stringsAsFactors = FALSE
+  )
+}) %>%
+  dplyr::bind_rows()
+
+# Aggregate votes and rank scores (higher score = higher rank across folds)
+pathway_votes_df <- all_pathways_by_fold %>%
+  dplyr::mutate(rank_score = max_rank - rank + 1) %>%
+  dplyr::group_by(pathway) %>%
+  dplyr::summarise(
+    votes = dplyr::n(),
+    rank_score = sum(rank_score),
+    mean_rank = mean(rank),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(dplyr::desc(rank_score), dplyr::desc(votes), mean_rank, pathway)
 
 cat("\nPathway voting results (top 20):\n")
 print(head(pathway_votes_df, 20))
 
-# Select the pathway with the most votes
+# Select the pathway with the best rank-weighted score
 unified_pathway <- pathway_votes_df$pathway[1]
-cat(sprintf("\n*** UNIFIED PATHWAY SELECTED: %s (votes: %d/%d folds) ***\n\n",
-            unified_pathway, pathway_votes_df$votes[1], length(all_top_pathways)))
+cat(sprintf("\n*** UNIFIED PATHWAY SELECTED: %s (rank_score: %d; votes: %d/%d folds) ***\n\n",
+            unified_pathway, pathway_votes_df$rank_score[1], pathway_votes_df$votes[1], length(all_top_pathways)))
 
 # Save pathway selection results
-pathway_selection_dir <- file.path("results", "summary_nested_cv")
+pathway_selection_dir <- file.path("results", "final_results", "summary_nested_cv")
 dir.create(pathway_selection_dir, recursive = TRUE, showWarnings = FALSE)
 
 write.csv(
@@ -2385,15 +3101,6 @@ write.csv(
 )
 
 # Save top pathways from each fold (define before using in plots)
-all_pathways_by_fold <- lapply(names(all_top_pathways), function(fold_label) {
-  data.frame(
-    fold = fold_label,
-    pathway = all_top_pathways[[fold_label]]$top_pathways,
-    rank = seq_along(all_top_pathways[[fold_label]]$top_pathways),
-    stringsAsFactors = FALSE
-  )
-}) %>%
-  dplyr::bind_rows()
 
 write.csv(
   all_pathways_by_fold,
@@ -2482,16 +3189,21 @@ ggsave(
 #################################################################################
 
 cat("\n=== Phase 2: Running full analysis with unified pathway ===\n\n")
+cat(sprintf(
+  "Outer folds: %d | Inner folds per outer: %d | Total configs: %d\n",
+  K_outer, K_inner, total_fold_configs
+))
 
 all_fold_results <- list()
 all_dml_results <- list()
 all_model_metrics <- list()
 all_comprehensive_metrics <- list()
+all_threshold_metrics <- list()
 all_test_predictions <- list()
 fold_errors <- list()
 
 for (outer_fold in seq_len(K_outer)) {
-  inner_folds <- setdiff(seq_len(K_outer), outer_fold)
+  inner_folds <- get_inner_folds_for_outer(outer_fold, K_outer, K_inner)
   inner_effects <- list()
   inner_dirs <- character(0)
 
@@ -2511,7 +3223,7 @@ for (outer_fold in seq_len(K_outer)) {
       inner_fold,
       outer_fold
     )
-    results_dir <- file.path("results", fold_label)
+    results_dir <- file.path("results", "final_results", fold_label)
     dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
     
     res <- tryCatch(
@@ -2535,6 +3247,10 @@ for (outer_fold in seq_len(K_outer)) {
       all_comprehensive_metrics[[fold_label]] <- res$comprehensive_metrics %>%
         dplyr::mutate(outer_fold = outer_fold, inner_fold = inner_fold, fold_label = fold_label)
     }
+    if (!is.null(res$all_threshold_metrics)) {
+      all_threshold_metrics[[fold_label]] <- res$all_threshold_metrics %>%
+        dplyr::mutate(outer_fold = outer_fold, inner_fold = inner_fold, fold_label = fold_label)
+    }
     if (!is.null(res$test_predictions)) {
       all_test_predictions[[fold_label]] <- res$test_predictions
     }
@@ -2553,7 +3269,7 @@ for (outer_fold in seq_len(K_outer)) {
     ) +
       geom_col(position = position_dodge(width = 0.7), width = 0.6) +
       geom_errorbar(
-        aes(ymin = theta - 1.645 * se, ymax = theta + 1.645 * se),
+        aes(ymin = theta - 1.96 * se, ymax = theta + 1.96 * se),
         position = position_dodge(width = 0.7),
         width = 0.2
       ) +
@@ -2580,12 +3296,12 @@ for (outer_fold in seq_len(K_outer)) {
 if (length(fold_errors)) {
   write.csv(
     data.frame(fold_label = names(fold_errors), error = unlist(fold_errors)),
-    file.path("results", "summary_nested_cv", "fold_errors.csv"),
+    file.path("results", "final_results", "summary_nested_cv", "fold_errors.csv"),
     row.names = FALSE
   )
 }
 
-summary_dir <- file.path("results", "summary_nested_cv")
+summary_dir <- file.path("results", "final_results", "summary_nested_cv")
 dir.create(summary_dir, recursive = TRUE, showWarnings = FALSE)
 
 all_dml_df <- dplyr::bind_rows(all_dml_results)
@@ -2620,10 +3336,15 @@ cat("\n=== Generating comprehensive summary plots ===\n\n")
 
 # Collect all comprehensive metrics
 all_comprehensive_metrics_df <- dplyr::bind_rows(all_comprehensive_metrics)
+all_threshold_metrics_df <- dplyr::bind_rows(all_threshold_metrics)
 all_test_predictions_df <- dplyr::bind_rows(all_test_predictions)
 
 if (nrow(all_comprehensive_metrics_df)) {
   write.csv(all_comprehensive_metrics_df, file.path(summary_dir, "all_comprehensive_test_metrics.csv"), row.names = FALSE)
+}
+
+if (nrow(all_threshold_metrics_df)) {
+  write.csv(all_threshold_metrics_df, file.path(summary_dir, "all_threshold_metrics.csv"), row.names = FALSE)
 }
 
 if (nrow(all_test_predictions_df)) {
@@ -2631,7 +3352,7 @@ if (nrow(all_test_predictions_df)) {
 }
 
 #################################################################################
-# Effect Size Forest Plot (DR theta across all 20 folds)
+# Effect Size Forest Plot (DR theta across all test folds)
 #################################################################################
 if (nrow(all_dml_df)) {
   # Filter to test split effects for forest plot
@@ -2654,7 +3375,7 @@ if (nrow(all_dml_df)) {
     scale_color_manual(values = c("DR-GLMNET" = "#E41A1C", "DR-RF" = "#377EB8", "DR-BART" = "#4DAF4A")) +
     labs(
       title = "Causal Effect Estimates Across All Folds (Forest Plot)",
-      subtitle = "Doubly robust theta with 90% CI (test set)",
+      subtitle = "Doubly robust theta with 95% CI (test set)",
       x = "Estimated Treatment Effect (theta)",
       y = "Fold",
       color = "Model"
@@ -2701,7 +3422,7 @@ if (nrow(all_dml_df)) {
   )
   
   #################################################################################
-  # Causal Effect Violin Plot (Distribution across 20 folds)
+  # Causal Effect Violin Plot (Distribution across all test folds)
   #################################################################################
   causal_violin_plot <- ggplot(test_effects, aes(x = model, y = theta, fill = model)) +
     geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
@@ -2710,7 +3431,7 @@ if (nrow(all_dml_df)) {
     geom_jitter(width = 0.1, alpha = 0.5, size = 1.5) +
     scale_fill_manual(values = c("DR-GLMNET" = "#E41A1C", "DR-RF" = "#377EB8", "DR-BART" = "#4DAF4A")) +
     labs(
-      title = "Distribution of Causal Effect Estimates Across 20 Test Folds",
+      title = sprintf("Distribution of Causal Effect Estimates Across %d Test Folds", total_fold_configs),
       subtitle = "Doubly robust theta estimates (test set)",
       x = "Model",
       y = "Estimated Treatment Effect (theta)",
@@ -2759,7 +3480,7 @@ if (nrow(all_model_metrics_df)) {
 }
 
 #################################################################################
-# Final Comparison: 3 Models × 20 Grouped Bars (Test Fold Performance)
+# Final Comparison: 3 Models × Fold Grouped Bars (Test Fold Performance)
 #################################################################################
 if (nrow(all_model_metrics_df)) {
   final_comparison_plot <- ggplot(
@@ -2770,7 +3491,7 @@ if (nrow(all_model_metrics_df)) {
     geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray40") +
     scale_fill_manual(values = c("DR-GLMNET" = "#E41A1C", "DR-RF" = "#377EB8", "DR-BART" = "#4DAF4A")) +
     labs(
-      title = "Test Set AUC Performance: 3 Models Across 20 Folds",
+      title = sprintf("Test Set AUC Performance: 3 Models Across %d Folds", total_fold_configs),
       subtitle = "Held-out test fold performance comparison",
       x = "Fold Index",
       y = "Test AUC",
@@ -2780,7 +3501,7 @@ if (nrow(all_model_metrics_df)) {
     theme(axis.text.x = element_text(size = 7, angle = 45, hjust = 1))
   
   ggsave(
-    filename = file.path(summary_dir, "final_comparison_20folds_grouped_bars.png"),
+    filename = file.path(summary_dir, sprintf("final_comparison_%dfolds_grouped_bars.png", total_fold_configs)),
     plot = final_comparison_plot,
     width = 16,
     height = 8,
@@ -2882,7 +3603,7 @@ if (nrow(all_test_predictions_df)) {
     geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray40") +
     labs(
       title = "Predicted Probabilities vs True Labels (All Test Folds Combined)",
-      subtitle = sprintf("N = %d predictions across 20 folds", nrow(pred_summary) / 3),
+      subtitle = sprintf("N = %d predictions across %d folds", nrow(pred_summary) / 3, total_fold_configs),
       x = "True Tumor Stage",
       y = "Predicted Probability of Late Stage",
       fill = "True Stage"
@@ -2897,6 +3618,205 @@ if (nrow(all_test_predictions_df)) {
     height = 6,
     dpi = 600
   )
+}
+
+#################################################################################
+# Overall Averaged ROC-AUC and PR-AUC Plots with Uncertainty Intervals
+#################################################################################
+
+cat("\n=== Generating overall averaged AUC plots across all folds ===\n\n")
+
+# Collect AUC values from all folds
+all_auc_data <- lapply(names(all_fold_results), function(fold_name) {
+  res <- all_fold_results[[fold_name]]
+  if (is.null(res$roc_auc_test) || is.null(res$pr_auc_test)) return(NULL)
+  
+  data.frame(
+    fold = fold_name,
+    model = names(res$roc_auc_test),
+    roc_auc_test = as.numeric(res$roc_auc_test),
+    roc_auc_val = as.numeric(res$roc_auc_val),
+    pr_auc_test = as.numeric(res$pr_auc_test),
+    pr_auc_val = as.numeric(res$pr_auc_val),
+    stringsAsFactors = FALSE
+  )
+}) %>% dplyr::bind_rows()
+
+if (nrow(all_auc_data)) {
+  # Save AUC data
+  write.csv(all_auc_data, file.path(summary_dir, "all_auc_values_by_fold.csv"), row.names = FALSE)
+  
+  # Compute summary statistics for AUC values
+  auc_summary <- all_auc_data %>%
+    dplyr::group_by(model) %>%
+    dplyr::summarise(
+      n_folds = dplyr::n(),
+      # ROC-AUC Test
+      roc_auc_test_mean = mean(roc_auc_test, na.rm = TRUE),
+      roc_auc_test_sd = sd(roc_auc_test, na.rm = TRUE),
+      roc_auc_test_se = sd(roc_auc_test, na.rm = TRUE) / sqrt(sum(!is.na(roc_auc_test))),
+      roc_auc_test_ci_lower = roc_auc_test_mean - 1.96 * roc_auc_test_se,
+      roc_auc_test_ci_upper = roc_auc_test_mean + 1.96 * roc_auc_test_se,
+      # PR-AUC Test
+      pr_auc_test_mean = mean(pr_auc_test, na.rm = TRUE),
+      pr_auc_test_sd = sd(pr_auc_test, na.rm = TRUE),
+      pr_auc_test_se = sd(pr_auc_test, na.rm = TRUE) / sqrt(sum(!is.na(pr_auc_test))),
+      pr_auc_test_ci_lower = pr_auc_test_mean - 1.96 * pr_auc_test_se,
+      pr_auc_test_ci_upper = pr_auc_test_mean + 1.96 * pr_auc_test_se,
+      .groups = "drop"
+    )
+  
+  write.csv(auc_summary, file.path(summary_dir, "auc_summary_statistics.csv"), row.names = FALSE)
+  
+  # Print summary
+  cat("\nROC-AUC Summary (Test Set) across", total_fold_configs, "folds:\n")
+  print(auc_summary %>% dplyr::select(model, n_folds, roc_auc_test_mean, roc_auc_test_sd, roc_auc_test_ci_lower, roc_auc_test_ci_upper))
+  
+  cat("\nPR-AUC Summary (Test Set) across", total_fold_configs, "folds:\n")
+  print(auc_summary %>% dplyr::select(model, n_folds, pr_auc_test_mean, pr_auc_test_sd, pr_auc_test_ci_lower, pr_auc_test_ci_upper))
+  
+  #################################################################################
+  # Averaged ROC-AUC Bar Plot with 95% CI
+  #################################################################################
+  roc_auc_bar_plot <- ggplot(auc_summary, aes(x = model, y = roc_auc_test_mean, fill = model)) +
+    geom_col(alpha = 0.8, width = 0.6) +
+    geom_errorbar(aes(ymin = pmax(0, roc_auc_test_ci_lower), ymax = pmin(1, roc_auc_test_ci_upper)), 
+                  width = 0.2, linewidth = 0.8) +
+    geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+    scale_fill_manual(values = c("DR-GLMNET" = "#E41A1C", "DR-RF" = "#377EB8", "DR-BART" = "#4DAF4A")) +
+    labs(
+      title = sprintf("Average ROC-AUC Across %d Test Folds", total_fold_configs),
+      subtitle = "Mean ± 95% CI (standard error-based)",
+      x = "Model",
+      y = "ROC-AUC",
+      fill = "Model"
+    ) +
+    coord_cartesian(ylim = c(0, 1)) +
+    theme_nature() +
+    theme(legend.position = "none")
+  
+  ggsave(filename = file.path(summary_dir, "averaged_roc_auc_bar_plot.png"), plot = roc_auc_bar_plot, width = 8, height = 6, dpi = 600)
+  
+  #################################################################################
+  # Averaged PR-AUC Bar Plot with 95% CI
+  #################################################################################
+  pr_auc_bar_plot <- ggplot(auc_summary, aes(x = model, y = pr_auc_test_mean, fill = model)) +
+    geom_col(alpha = 0.8, width = 0.6) +
+    geom_errorbar(aes(ymin = pmax(0, pr_auc_test_ci_lower), ymax = pmin(1, pr_auc_test_ci_upper)), 
+                  width = 0.2, linewidth = 0.8) +
+    scale_fill_manual(values = c("DR-GLMNET" = "#E41A1C", "DR-RF" = "#377EB8", "DR-BART" = "#4DAF4A")) +
+    labs(
+      title = sprintf("Average PR-AUC Across %d Test Folds", total_fold_configs),
+      subtitle = "Mean ± 95% CI (standard error-based)",
+      x = "Model",
+      y = "PR-AUC",
+      fill = "Model"
+    ) +
+    coord_cartesian(ylim = c(0, 1)) +
+    theme_nature() +
+    theme(legend.position = "none")
+  
+  ggsave(filename = file.path(summary_dir, "averaged_pr_auc_bar_plot.png"), plot = pr_auc_bar_plot, width = 8, height = 6, dpi = 600)
+  
+  #################################################################################
+  # Combined AUC Forest Plot (ROC and PR-AUC side by side)
+  #################################################################################
+  auc_forest_data <- auc_summary %>%
+    tidyr::pivot_longer(
+      cols = c(roc_auc_test_mean, pr_auc_test_mean),
+      names_to = "metric_type",
+      values_to = "mean_auc"
+    ) %>%
+    dplyr::mutate(
+      ci_lower = dplyr::case_when(
+        metric_type == "roc_auc_test_mean" ~ roc_auc_test_ci_lower,
+        metric_type == "pr_auc_test_mean" ~ pr_auc_test_ci_lower
+      ),
+      ci_upper = dplyr::case_when(
+        metric_type == "roc_auc_test_mean" ~ roc_auc_test_ci_upper,
+        metric_type == "pr_auc_test_mean" ~ pr_auc_test_ci_upper
+      ),
+      metric_type = dplyr::case_when(
+        metric_type == "roc_auc_test_mean" ~ "ROC-AUC",
+        metric_type == "pr_auc_test_mean" ~ "PR-AUC"
+      )
+    )
+  
+  auc_forest_plot <- ggplot(auc_forest_data, aes(x = mean_auc, y = model, color = model)) +
+    geom_vline(xintercept = 0.5, linetype = "dashed", color = "gray50") +
+    geom_point(size = 4) +
+    geom_errorbarh(aes(xmin = ci_lower, xmax = ci_upper), height = 0.2, linewidth = 1) +
+    facet_wrap(~ metric_type, ncol = 2, scales = "free_x") +
+    scale_color_manual(values = c("DR-GLMNET" = "#E41A1C", "DR-RF" = "#377EB8", "DR-BART" = "#4DAF4A")) +
+    labs(
+      title = sprintf("Model Performance Summary: Mean AUC ± 95%% CI (%d Folds)", total_fold_configs),
+      x = "AUC Value",
+      y = "Model",
+      color = "Model"
+    ) +
+    coord_cartesian(xlim = c(0.3, 1)) +
+    theme_nature() +
+    theme(legend.position = "none")
+  
+  ggsave(filename = file.path(summary_dir, "auc_forest_plot_summary.png"), plot = auc_forest_plot, width = 12, height = 5, dpi = 600)
+  
+  #################################################################################
+  # AUC Distribution Box Plot (showing variability across folds)
+  #################################################################################
+  auc_long <- all_auc_data %>%
+    tidyr::pivot_longer(
+      cols = c(roc_auc_test, pr_auc_test),
+      names_to = "metric",
+      values_to = "auc"
+    ) %>%
+    dplyr::mutate(
+      metric = dplyr::case_when(
+        metric == "roc_auc_test" ~ "ROC-AUC",
+        metric == "pr_auc_test" ~ "PR-AUC"
+      )
+    )
+  
+  auc_distribution_plot <- ggplot(auc_long, aes(x = model, y = auc, fill = model)) +
+    geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+    geom_jitter(width = 0.2, alpha = 0.5, size = 1.5) +
+    facet_wrap(~ metric, ncol = 2) +
+    geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+    scale_fill_manual(values = c("DR-GLMNET" = "#E41A1C", "DR-RF" = "#377EB8", "DR-BART" = "#4DAF4A")) +
+    labs(
+      title = sprintf("AUC Distribution Across %d Test Folds", total_fold_configs),
+      subtitle = "Each point represents one fold's test set performance",
+      x = "Model",
+      y = "AUC Value",
+      fill = "Model"
+    ) +
+    coord_cartesian(ylim = c(0.3, 1)) +
+    theme_nature() +
+    theme(legend.position = "none")
+  
+  ggsave(filename = file.path(summary_dir, "auc_distribution_boxplot.png"), plot = auc_distribution_plot, width = 10, height = 6, dpi = 600)
+  
+  #################################################################################
+  # Pairwise Model Comparison (Fold-by-Fold)
+  #################################################################################
+  auc_wide <- all_auc_data %>%
+    dplyr::select(fold, model, roc_auc_test) %>%
+    tidyr::pivot_wider(names_from = model, values_from = roc_auc_test)
+  
+  if (all(c("DR-GLMNET", "DR-RF", "DR-BART") %in% names(auc_wide))) {
+    pairwise_plot <- ggplot(auc_wide, aes(x = `DR-GLMNET`, y = `DR-RF`)) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+      geom_point(size = 2.5, alpha = 0.7, color = "#377EB8") +
+      labs(
+        title = "Fold-by-Fold ROC-AUC Comparison: GLMNET vs RF",
+        subtitle = "Points above diagonal indicate RF outperforms GLMNET",
+        x = "DR-GLMNET ROC-AUC",
+        y = "DR-RF ROC-AUC"
+      ) +
+      coord_equal(xlim = c(0.4, 1), ylim = c(0.4, 1)) +
+      theme_nature()
+    
+    ggsave(filename = file.path(summary_dir, "pairwise_auc_glmnet_vs_rf.png"), plot = pairwise_plot, width = 7, height = 7, dpi = 600)
+  }
 }
 
 cat("\n=== Summary plots saved to:", summary_dir, "===\n\n")
