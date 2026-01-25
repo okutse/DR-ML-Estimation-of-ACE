@@ -930,6 +930,13 @@ train_mat_raw <- exp_mat[, train_ids, drop = FALSE]
 val_mat_raw <- exp_mat[, val_ids, drop = FALSE]
 test_mat_raw <- exp_mat[, test_ids, drop = FALSE]
 
+cat(sprintf("Preprocessing input dimensions (genes x samples): train=%d x %d, val=%d x %d, test=%d x %d\n",
+            nrow(train_mat_raw), ncol(train_mat_raw),
+            nrow(val_mat_raw), ncol(val_mat_raw),
+            nrow(test_mat_raw), ncol(test_mat_raw)))
+cat(sprintf("Preprocessing totals: genes=%d, samples=%d, entries=%d\n",
+            nrow(exp_mat), ncol(exp_mat), nrow(exp_mat) * ncol(exp_mat)))
+
 ## Preprocess
 # qn_reference <- compute_qn_reference(train_mat_raw)
 # train_qn <- apply_qn(train_mat_raw, qn_reference)
@@ -960,6 +967,13 @@ test_mat_raw <- exp_mat[, test_ids, drop = FALSE]
 expr_train = collapse_duplicate_genes(train_mat_raw)
 expr_val = collapse_duplicate_genes(val_mat_raw)
 expr_test = collapse_duplicate_genes(test_mat_raw)
+
+cat(sprintf("Postprocessing dimensions (genes x samples): train=%d x %d, val=%d x %d, test=%d x %d\n",
+            nrow(expr_train), ncol(expr_train),
+            nrow(expr_val), ncol(expr_val),
+            nrow(expr_test), ncol(expr_test)))
+cat(sprintf("Postprocessing totals: genes=%d, samples=%d, entries=%d\n",
+            nrow(expr_train), ncol(expr_train), nrow(expr_train) * ncol(expr_train)))
 
 expr_splits <- list(
   train = expr_train,
@@ -1225,6 +1239,14 @@ bc_terms <- msigdbr::msigdbr(
   dplyr::filter(stringr::str_detect(gs_name, "BREAST|MAMMARY|BRCA|ERBB2|HER2|ESTROGEN|LUMINAL|BASAL", negate = FALSE)) %>%
   dplyr::select(gs_name, gene_symbol) %>%
   dplyr::distinct()
+
+print(bc_terms)
+
+print(msigdbr::msigdbr(
+  species = "Homo sapiens", 
+  collection = "C2",
+  subcollection = "CP" # canonical pathways: 
+) %>% dplyr::select(gs_name, gene_symbol) %>% dplyr::distinct() %>% head() )
 
 if (!nrow(bc_terms)) {
   message("No breast cancer-specific CGP sets found; defaulting to Hallmark collection.")
@@ -1548,11 +1570,15 @@ covariate_association <- lapply(adjustment_covariates, function(var) {
     stat <- if (is.null(fit)) NA_real_ else summary(fit)$r.squared
     data.frame(variable = var, metric = "R^2", value = stat)
   }
-}) %>% dplyr::bind_rows()
+}) %>% dplyr::bind_rows() 
+
 
 print("Association between GSVA treatment and covariates:")
 print(covariate_association)
 
+
+print( covariate_association |> dplyr::arrange(metric, desc(value)))
+print( covariate_association |> dplyr::arrange(desc(metric), desc(value)))
 
 
 #################################################################################
