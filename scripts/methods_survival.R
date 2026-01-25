@@ -1,5 +1,5 @@
 # Title: Doubly-robust machine learning estimation of the average causal effect of (selected) DEGs on breast cancer stage and survival outcomes
-# Author: Amos Okutse
+# Author: Amos Okutse, Man-Fang Liang
 # Date: Jan 2025
 
 
@@ -54,6 +54,7 @@ library(glmnet)       # high-dimensional regression
 
 # source helper files
 source("scripts/helper.R")
+source("scripts/survival_helpers.R")
 
 # -----------------------------------------------------------------------------
 # Helper utilities used across the workflow
@@ -307,7 +308,8 @@ bart_dml_partial <- function(Y, D, X, split_label, K = 5, seed = 202501,
   for (k in seq_len(K)) {
     idx_train <- folds != k
     idx_test <- folds == k
-    outcome_fit <- BART::pbart(
+    # Outcome learner: now wbart (regression) for continuous pseudo-outcome
+    outcome_fit <- BART::wbart(
       x.train = X[idx_train, , drop = FALSE],
       y.train = Y[idx_train],
       x.test = X[idx_test, , drop = FALSE],
@@ -317,6 +319,7 @@ bart_dml_partial <- function(Y, D, X, split_label, K = 5, seed = 202501,
       sparse = TRUE,
       usequants = TRUE
     )
+    # Treatment learner: wbart (regression) for continuous pathway score
     treatment_fit <- BART::wbart(
       x.train = X[idx_train, , drop = FALSE],
       y.train = D[idx_train],
@@ -327,7 +330,8 @@ bart_dml_partial <- function(Y, D, X, split_label, K = 5, seed = 202501,
       sparse = TRUE,
       usequants = TRUE
     )
-    g_hat <- as.numeric(outcome_fit$prob.test.mean)
+    # Extract predictions (now continuous for both)
+    g_hat <- as.numeric(outcome_fit$yhat.test.mean)
     m_hat <- as.numeric(treatment_fit$yhat.test.mean)
     y_tilde[idx_test] <- Y[idx_test] - g_hat
     d_tilde[idx_test] <- D[idx_test] - m_hat
@@ -390,7 +394,16 @@ cs <- cs %>% dplyr::mutate(`HER2 Status` = dplyr::na_if(`HER2 Status`, "")) %>%
     tumor_stage == "early" ~ 1 / sum(tumor_stage == "early", na.rm = TRUE),
     tumor_stage == "late" ~ 1 / sum(tumor_stage == "late", na.rm = TRUE),
     TRUE ~ NA_real_
-  )) %>% 
+  )) %>%
+  # Prepare survival outcome variables (OS_MONTHS, OS_STATUS)
+  dplyr::mutate(
+    OS_MONTHS = as.numeric(overall_survival_months),
+    OS_STATUS_BINARY = case_when(
+      overall_survival_status == "1:DECEASED" ~ 1,
+      overall_survival_status == "0:LIVING" ~ 0,
+      TRUE ~ NA_real_
+    )
+  ) %>% 
   # add ER status mask (1 = observed, 0 = missing) to address missing confounder data
   dplyr::mutate(er_status_mask = if_else(!is.na(er_status), 1, 0)) %>% 
   # convert covariates to factors
@@ -519,9 +532,15 @@ exp_mat <- exp_mat[ , common_samples, drop = FALSE]
 dt2 <- dt %>%
   dplyr::filter(patient_id %in% common_samples) %>%
   dplyr::arrange(match(patient_id, colnames(exp_mat)))
-# Keep tumor_stage (required for stratification) and don't drop other clinical columns yet
-dt2 <- dt2[!is.na(dt2$tumor_stage), ] # filter to non-missing tumor stage
-cat("dt2 after filtering to non-missing tumor stage: ", nrow(dt2), " rows\n")
+
+# Filter to samples with complete survival outcome data (OS_MONTHS and OS_STATUS)
+dt2 <- dt2 %>%
+  dplyr::filter(!is.na(OS_MONTHS), !is.na(OS_STATUS_BINARY))
+
+cat("dt2 after filtering to complete survival data: ", nrow(dt2), " rows\n")
+cat(sprintf("Event rate: %.1f%% (n=%d deaths)\n", 
+    mean(dt2$OS_STATUS_BINARY == 1) * 100, 
+    sum(dt2$OS_STATUS_BINARY == 1)))
 cat("dt2 columns:", paste(colnames(dt2), collapse=", "), "\n")
 exp_mat <- exp_mat[, dt2$patient_id, drop = FALSE] # keep only subjects with observed tumor stage to align ids
 grp <- factor(dt2$tumor_stage, levels = c("early", "late")) # early = 1338; late = 128; n = 1466 samples
@@ -534,7 +553,8 @@ summary(as.numeric(exp_mat))
 exp_mat <- exp_mat[complete.cases(exp_mat), , drop = FALSE]
 
 # Pre-processing steps for mRNA expression data
-## Train, val, test split before preprocessing using stratification by tumor stage
+## Train, val, test split before preprocessing using stratification by survival outcome
+# Stratify by OS_STATUS_BINARY (event status) to ensure balanced event rates across splits
 sample_ids <- colnames(exp_mat)
 n_total <- length(sample_ids)
 train_frac <- 0.70
@@ -542,7 +562,7 @@ val_frac <- 0.15
 
 split_ids <- stratified_split(
   ids = sample_ids,
-  strata = dt2$tumor_stage,
+  strata = dt2$OS_STATUS_BINARY,  # Stratify by survival outcome instead of tumor stage
   train_frac = train_frac,
   val_frac = val_frac,
   seed = 202501
@@ -556,15 +576,68 @@ if (!length(train_ids) || !length(val_ids) || !length(test_ids)) {
   stop("Stratified split failed; one of the partitions is empty.")
 }
 
-split_stage_summary <- lapply(
+# Check survival outcome distribution by split (event vs censored)
+split_outcome_summary <- lapply(
   list(train = train_ids, val = val_ids, test = test_ids),
   function(ids) {
-    stages <- dt2$tumor_stage[match(ids, dt2$patient_id)]
-    table(factor(stages, levels = c("early", "late")), useNA = "ifany")
+    os_status <- dt2$OS_STATUS_BINARY[match(ids, dt2$patient_id)]
+    table(factor(os_status, levels = c(0, 1), labels = c("Censored", "Event")), useNA = "ifany")
   }
 )
-print("Tumor stage distribution by split:")
-print(split_stage_summary)
+cat("\n=== Survival Outcome Distribution by Split ===\n")
+print(split_outcome_summary)
+
+# ===== Survival Outcome Preparation =====
+cat("\n=== Preparing Survival Outcome (RMST Pseudo-outcome via IPCW) ===\n")
+
+# Set tau = 120 months (10 years)
+tau <- 120
+cat(sprintf("Time horizon tau = %.0f months\n", tau))
+
+# Check survival data quality
+survival_quality <- check_survival_quality(
+  time = dt2$OS_MONTHS,
+  event = dt2$OS_STATUS_BINARY,
+  tau = tau
+)
+cat(sprintf("Total samples: %d\n", survival_quality$n_total))
+cat(sprintf("Events (deaths): %d (%.1f%%)\n", 
+    survival_quality$n_events, survival_quality$event_rate * 100))
+cat(sprintf("Censored: %d (%.1f%%)\n", 
+    survival_quality$n_censored, survival_quality$censor_rate * 100))
+cat(sprintf("Events by tau=%.0f: %d (%.1f%%)\n", 
+    tau, survival_quality$events_by_tau, survival_quality$event_rate_by_tau * 100))
+cat(sprintf("Median follow-up: %.1f months\n", survival_quality$median_followup))
+
+# Compute censoring weights G(t) using Kaplan-Meier
+cat("\nComputing censoring weights using Kaplan-Meier...\n")
+G_t <- compute_censoring_weights(
+  time = dt2$OS_MONTHS,
+  event = dt2$OS_STATUS_BINARY,
+  method = "KM"
+)
+
+cat(sprintf("G(t) range: [%.3f, %.3f]\n", min(G_t), max(G_t)))
+cat(sprintf("G(t) mean: %.3f (SD = %.3f)\n", mean(G_t), sd(G_t)))
+
+# Compute RMST pseudo-outcome
+cat("\nComputing RMST pseudo-outcome...\n")
+dt2$Y_pseudo <- compute_rmst_pseudo(
+  time = dt2$OS_MONTHS,
+  event = dt2$OS_STATUS_BINARY,
+  G_t = G_t,
+  tau = tau,
+  trim_quantile = 0.95
+)
+
+cat(sprintf("Pseudo-outcome range: [%.2f, %.2f]\n", 
+    min(dt2$Y_pseudo), max(dt2$Y_pseudo)))
+cat(sprintf("Pseudo-outcome mean: %.2f (SD = %.2f)\n", 
+    mean(dt2$Y_pseudo), sd(dt2$Y_pseudo)))
+cat(sprintf("Pseudo-outcome median: %.2f (IQR: [%.2f, %.2f])\n",
+    median(dt2$Y_pseudo), 
+    quantile(dt2$Y_pseudo, 0.25), 
+    quantile(dt2$Y_pseudo, 0.75)))
 
 collapse_duplicate_genes <- function(mat) {
   rn <- rownames(mat)
@@ -1034,18 +1107,19 @@ pathway_scores <- lapply(names(gsva_scores), function(split_name) {
 names(pathway_scores) <- names(gsva_scores)
 
 train_pathway_df <- pathway_scores$train %>%
-  dplyr::left_join(clinical_splits$train %>% dplyr::select(patient_id, tumor_stage), by = "patient_id")
+  dplyr::left_join(clinical_splits$train %>% dplyr::select(patient_id, OS_STATUS_BINARY), by = "patient_id") %>%
+  dplyr::mutate(outcome_group = factor(OS_STATUS_BINARY, levels = c(0, 1), labels = c("Censored", "Event")))
 
-gsva_density_plot <- ggplot(train_pathway_df, aes(x = pathway_score, fill = tumor_stage)) +
+gsva_density_plot <- ggplot(train_pathway_df, aes(x = pathway_score, fill = outcome_group)) +
   geom_density(alpha = 0.65) +
   labs(
     title = sprintf("GSVA distribution for %s", selected_pathway_label),
-    subtitle = "Treatment D (GSVA score)",
+    subtitle = "Treatment D (GSVA score) by Survival Outcome",
     x = "GSVA score",
     y = "Density",
-    fill = "Tumor stage"
+    fill = "Outcome"
   ) +
-  scale_fill_manual(values = c("early" = "#63A375", "late" = "#E4572E")) +
+  scale_fill_manual(values = c("Censored" = "#63A375", "Event" = "#E4572E")) +
   theme_nature()
 gsva_density_plot
 
@@ -1097,14 +1171,10 @@ assemble_split_df <- function(clin_df, split_name) {
     dplyr::left_join(mutation_summary, by = "patient_id") %>%
     dplyr::left_join(methylation_summary, by = "patient_id") %>%
     dplyr::mutate(
-      tumor_stage_binary = dplyr::case_when(
-        tumor_stage == "late" ~ 1,
-        tumor_stage == "early" ~ 0,
-        TRUE ~ NA_real_
-      ),
       split = split_name
     ) %>%
-    dplyr::filter(!is.na(tumor_stage_binary), !is.na(pathway_score))
+    # Filter to samples with valid survival pseudo-outcome and pathway score
+    dplyr::filter(!is.na(Y_pseudo), !is.na(pathway_score))
 }
 
 train_df <- assemble_split_df(clinical_splits$train, "train")
@@ -1116,6 +1186,7 @@ full_df <- dplyr::bind_rows(train_df, val_df, test_df)
 adjustment_covariates <- c(
   "age_at_diagnosis",
   "tumor_size",
+  "tumor_stage",  # Added: control for tumor stage as confounder
   "er_status",
   "pr_status",
   "her2_status",
@@ -1132,7 +1203,8 @@ adjustment_covariates <- c(
 )
 
 assumption_summary <- train_df %>%
-  dplyr::group_by(tumor_stage) %>%
+  dplyr::mutate(outcome_group = factor(OS_STATUS_BINARY, levels = c(0, 1), labels = c("Censored", "Event"))) %>%
+  dplyr::group_by(outcome_group) %>%
   dplyr::summarise(
     mean_D = mean(pathway_score),
     sd_D = sd(pathway_score),
@@ -1141,15 +1213,16 @@ assumption_summary <- train_df %>%
     n = dplyr::n(),
     .groups = "drop"
   )
-print("GSVA treatment summary by tumor stage (train split):")
+cat("\n=== GSVA Treatment Summary by Survival Outcome (Train Split) ===\n")
 print(assumption_summary)
 
-summarize_stage_gsva <- function(df, split_label) {
+summarize_outcome_gsva <- function(df, split_label) {
   if (!nrow(df)) {
     return(dplyr::tibble())
   }
   df %>%
-    dplyr::group_by(tumor_stage) %>%
+    dplyr::mutate(outcome_group = factor(OS_STATUS_BINARY, levels = c(0, 1), labels = c("Censored", "Event"))) %>%
+    dplyr::group_by(outcome_group) %>%
     dplyr::summarise(
       mean_D = mean(pathway_score),
       sd_D = sd(pathway_score),
@@ -1161,14 +1234,14 @@ summarize_stage_gsva <- function(df, split_label) {
     dplyr::mutate(split = split_label, .before = 1)
 }
 
-gsva_stage_summaries <- dplyr::bind_rows(
-  summarize_stage_gsva(train_df, "train"),
-  summarize_stage_gsva(val_df, "val"),
-  summarize_stage_gsva(test_df, "test")
+gsva_outcome_summaries <- dplyr::bind_rows(
+  summarize_outcome_gsva(train_df, "train"),
+  summarize_outcome_gsva(val_df, "val"),
+  summarize_outcome_gsva(test_df, "test")
 )
-print("GSVA treatment summary by split (descriptive stage-wise means):")
-print(gsva_stage_summaries)
-# These split-specific GSVA contrasts are descriptive balance checks, not true causal treatment effects or significance tests--the DR estimators below address those.
+cat("\n=== GSVA Treatment Summary by Survival Outcome (Event vs Censored) ===\n")
+print(gsva_outcome_summaries)
+cat("Note: These are descriptive balance checks, not causal effects.\n")
 
 covariate_association <- lapply(adjustment_covariates, function(var) {
   values <- train_df[[var]]
@@ -1198,6 +1271,8 @@ print(covariate_association)
 set.seed(202501)
 
 cov_formula <- stats::as.formula(paste("~ 0 +", paste(adjustment_covariates, collapse = " + ")))
+
+# Updated DML function for survival outcome (RMST pseudo-outcome)
 run_split_dml <- function(df, split_label) {
   if (!nrow(df)) {
     return(dplyr::tibble())
@@ -1206,27 +1281,31 @@ run_split_dml <- function(df, split_label) {
   cov_df <- apply_imputer(df, cov_imp)
   cov_matrix <- model.matrix(cov_formula, data = cov_df)
 
+  # DR-GLMNET: now uses gaussian family for continuous pseudo-outcome
   glmnet_fit <- dml_partial_linear(
-    Y = df$tumor_stage_binary,
+    Y = df$Y_pseudo,  # RMST pseudo-outcome
     D = df$pathway_score,
     X = cov_matrix,
-    outcome_learner = glmnet_learner(family = "binomial", alpha = 0.5),
+    outcome_learner = glmnet_learner(family = "gaussian", alpha = 0.5),
     treatment_learner = glmnet_learner(family = "gaussian", alpha = 0.5),
     K = 5,
     seed = 202501
   )
 
+  # DR-RF: now uses regression for continuous pseudo-outcome
   rf_fit <- dml_partial_linear(
-    Y = df$tumor_stage_binary,
+    Y = df$Y_pseudo,  # RMST pseudo-outcome
     D = df$pathway_score,
     X = cov_df,
-    outcome_learner = ranger_learner(task = "classification", num.trees = 1200),
+    outcome_learner = ranger_learner(task = "regression", num.trees = 1200),
     treatment_learner = ranger_learner(task = "regression", num.trees = 1200),
     K = 5,
     seed = 202501
   )
+  
+  # DR-BART: now uses wbart for continuous pseudo-outcome
   bart_tbl <- bart_dml_partial(
-    Y = df$tumor_stage_binary,
+    Y = df$Y_pseudo,  # RMST pseudo-outcome
     D = df$pathway_score,
     X = cov_matrix,
     split_label = split_label,
@@ -1253,14 +1332,17 @@ dml_split_tbl <- dplyr::bind_rows(
   run_split_dml(test_df, "test")
 )
 
-print("Doubly robust estimates for GSVA treatment effect on tumor stage (all splits):")
+cat("\n=== Doubly Robust Estimates for GSVA Treatment Effect on RMST (Survival Outcome) ===\n")
+cat("Interpretation: theta = change in RMST (months) per 1-unit increase in pathway score\n\n")
+print("Doubly robust estimates for GSVA treatment effect on RMST (all splits):")
 print(dml_split_tbl)
-# Best practice: When sharing split-wise DR effects, spell out the nuisance learners and fold structure so readers grasp how cross-fitting protected against overfitting.
+cat("\nNote: These estimates use cross-fitting with K=5 folds to prevent overfitting.\n")
+cat("Outcome learners predict RMST pseudo-outcome (continuous), treatment learners predict pathway score.\n")
 
 dml_full_tbl <- run_split_dml(full_df, "all")
-print("Doubly robust estimates when pooling train/val/test (exploratory full-data fit):")
+print("\nDoubly robust estimates when pooling train/val/test (exploratory full-data fit):")
 print(dml_full_tbl)
-# Best practice: Clearly label pooled fits as exploratory because no holdout remains—regulators expect confirmatory claims to rely on untouched test data.
+cat("\nNote: Pooled fit is exploratory only - no holdout test set remains for validation.\n")
 
 dr_effects_tbl <- dml_split_tbl %>% dplyr::filter(split == "train")
 
@@ -1280,56 +1362,53 @@ trainval_cov_df <- apply_imputer(trainval_df, cov_imputer_trainval)
 X_trainval_cov <- model.matrix(cov_formula, data = trainval_cov_df)
 X_trainval_full <- cbind(pathway_score = trainval_df$pathway_score, X_trainval_cov)
 
-foldid <- create_stratified_folds(trainval_df$tumor_stage_binary, k = 5, seed = 202501)
-glmnet_classifier <- glmnet::cv.glmnet(
+# GLMNET regression model for RMST pseudo-outcome prediction
+glmnet_regressor <- glmnet::cv.glmnet(
   X_trainval_full,
-  trainval_df$tumor_stage_binary,
-  family = "binomial",
-  alpha = 0.5,
-  foldid = foldid
+  trainval_df$Y_pseudo,  # Continuous RMST pseudo-outcome
+  family = "gaussian",   # Regression instead of classification
+  alpha = 0.5
 )
 
 test_cov_df <- apply_imputer(test_df, cov_imputer_trainval)
 X_test_cov <- model.matrix(cov_formula, data = test_cov_df)
 X_test_full <- cbind(pathway_score = test_df$pathway_score, X_test_cov)
-glmnet_test_pred <- as.numeric(stats::predict(glmnet_classifier, newx = X_test_full, s = "lambda.min", type = "response"))
+glmnet_test_pred <- as.numeric(stats::predict(glmnet_regressor, newx = X_test_full, s = "lambda.min", type = "response"))
 
-glmnet_auc <- compute_auc(glmnet_test_pred, test_df$tumor_stage_binary)
-glmnet_cindex <- binary_c_index(glmnet_test_pred, test_df$tumor_stage_binary)
+# Compute prediction metrics for continuous outcome (MSE, MAE, R^2)
+glmnet_mse <- mean((glmnet_test_pred - test_df$Y_pseudo)^2)
+glmnet_mae <- mean(abs(glmnet_test_pred - test_df$Y_pseudo))
+glmnet_r2 <- 1 - sum((test_df$Y_pseudo - glmnet_test_pred)^2) / sum((test_df$Y_pseudo - mean(test_df$Y_pseudo))^2)
 
+# Random Forest regression model for RMST pseudo-outcome prediction
 rf_features <- c("pathway_score", adjustment_covariates)
 rf_imputer <- fit_imputer(trainval_df, rf_features)
 rf_train_df <- apply_imputer(trainval_df, rf_imputer)
-rf_train_df$tumor_stage_binary <- factor(trainval_df$tumor_stage_binary, levels = c(0, 1))
+rf_train_df$Y_pseudo <- trainval_df$Y_pseudo  # Add continuous outcome
 
-rf_classifier <- ranger::ranger(
-  tumor_stage_binary ~ .,
+rf_regressor <- ranger::ranger(
+  Y_pseudo ~ .,  # Regression on RMST pseudo-outcome
   data = rf_train_df,
   num.trees = 1500,
   mtry = max(1, floor(sqrt(ncol(rf_train_df) - 1))),
-  probability = TRUE,
   respect.unordered.factors = "order",
   seed = 202501
 )
 
 rf_test_df <- apply_imputer(test_df, rf_imputer)
-rf_test_pred_mat <- predict(rf_classifier, data = rf_test_df)$predictions
-rf_test_pred <- if (is.matrix(rf_test_pred_mat)) {
-  as.numeric(rf_test_pred_mat[, "1", drop = TRUE])
-} else {
-  as.numeric(rf_test_pred_mat)
-}
+rf_test_pred <- as.numeric(predict(rf_regressor, data = rf_test_df)$predictions)
 
-rf_auc <- compute_auc(rf_test_pred, test_df$tumor_stage_binary)
-rf_cindex <- binary_c_index(rf_test_pred, test_df$tumor_stage_binary)
+# Compute prediction metrics for continuous outcome
+rf_mse <- mean((rf_test_pred - test_df$Y_pseudo)^2)
+rf_mae <- mean(abs(rf_test_pred - test_df$Y_pseudo))
+rf_r2 <- 1 - sum((test_df$Y_pseudo - rf_test_pred)^2) / sum((test_df$Y_pseudo - mean(test_df$Y_pseudo))^2)
 
-# Bayesian Additive Regression Trees provide a flexible, uncertainty-aware classifier we can
-# compare against the discriminative DR models for predictive sensitivity analysis.
+# Bayesian Additive Regression Trees for RMST pseudo-outcome regression
 bart_seed <- 202501
 set.seed(bart_seed)
-bart_fit <- BART::pbart(
+bart_fit <- BART::wbart(  # Changed from pbart to wbart for regression
   x.train = X_trainval_full,
-  y.train = trainval_df$tumor_stage_binary,
+  y.train = trainval_df$Y_pseudo,  # Continuous RMST pseudo-outcome
   x.test = X_test_full,
   ntree = 200,
   ndpost = 1500,
@@ -1337,23 +1416,28 @@ bart_fit <- BART::pbart(
   usequants = TRUE,
   sparse = TRUE
 )
-bart_test_pred <- as.numeric(bart_fit$prob.test.mean)
-bart_auc <- compute_auc(bart_test_pred, test_df$tumor_stage_binary)
-bart_cindex <- binary_c_index(bart_test_pred, test_df$tumor_stage_binary)
+bart_test_pred <- as.numeric(bart_fit$yhat.test.mean)  # Changed from prob.test.mean
+
+# Compute prediction metrics for continuous outcome
+bart_mse <- mean((bart_test_pred - test_df$Y_pseudo)^2)
+bart_mae <- mean(abs(bart_test_pred - test_df$Y_pseudo))
+bart_r2 <- 1 - sum((test_df$Y_pseudo - bart_test_pred)^2) / sum((test_df$Y_pseudo - mean(test_df$Y_pseudo))^2)
 
 model_metrics <- dplyr::tibble(
   model = c("DR-GLMNET", "DR-RF", "DR-BART"),
-  test_auc = c(glmnet_auc, rf_auc, bart_auc),
-  test_cindex = c(glmnet_cindex, rf_cindex, bart_cindex)
+  test_mse = c(glmnet_mse, rf_mse, bart_mse),
+  test_mae = c(glmnet_mae, rf_mae, bart_mae),
+  test_r2 = c(glmnet_r2, rf_r2, bart_r2)
 )
 
-print("Test-set predictive performance (AUC and concordance index):")
+cat("\n=== Test-set Predictive Performance for RMST Pseudo-outcome (Regression Metrics) ===\n")
 print(model_metrics)
+cat("\nNote: Lower MSE/MAE and higher R^2 indicate better predictive performance.\n")
 
 reporting_candidates <- c("DR-GLMNET", "DR-RF", "DR-BART")
 best_model <- model_metrics %>%
   dplyr::filter(model %in% reporting_candidates) %>%
-  dplyr::arrange(dplyr::desc(test_auc), dplyr::desc(test_cindex)) %>%
+  dplyr::arrange(test_mse, dplyr::desc(test_r2)) %>%  # Best = lowest MSE, highest R2
   dplyr::slice_head(n = 1) %>%
   dplyr::pull(model)
 
@@ -1382,21 +1466,22 @@ clinical_imp <- fit_imputer(train_df, clinical_covariates)
 clinical_cov_df <- apply_imputer(train_df, clinical_imp)
 clinical_matrix <- model.matrix(clinical_formula, data = clinical_cov_df)
 
+# Sensitivity analysis: estimate treatment effect using clinical covariates only
 clinical_glmnet <- dml_partial_linear(
-  Y = train_df$tumor_stage_binary,
+  Y = train_df$Y_pseudo,  # RMST pseudo-outcome
   D = train_df$pathway_score,
   X = clinical_matrix,
-  outcome_learner = glmnet_learner(family = "binomial", alpha = 0.5),
+  outcome_learner = glmnet_learner(family = "gaussian", alpha = 0.5),
   treatment_learner = glmnet_learner(family = "gaussian", alpha = 0.5),
   K = 5,
   seed = 202501
 )
 
 clinical_rf <- dml_partial_linear(
-  Y = train_df$tumor_stage_binary,
+  Y = train_df$Y_pseudo,  # RMST pseudo-outcome
   D = train_df$pathway_score,
   X = clinical_cov_df,
-  outcome_learner = ranger_learner(task = "classification", num.trees = 1200),
+  outcome_learner = ranger_learner(task = "regression", num.trees = 1200),
   treatment_learner = ranger_learner(task = "regression", num.trees = 1200),
   K = 5,
   seed = 202501
