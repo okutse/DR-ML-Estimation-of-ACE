@@ -321,7 +321,8 @@ create_confusion_matrix_plot <- function(pred_prob, truth, threshold, model_name
 }
 
 #' Create ROC curve plot
-create_roc_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, model_name) {
+create_roc_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, model_name,
+                                  threshold_adj = NULL, threshold_label = "Youden") {
   roc_val <- tryCatch(pROC::roc(response = truth_val, predictor = pred_val, quiet = TRUE, direction = "<"), error = function(e) NULL)
   roc_test <- tryCatch(pROC::roc(response = truth_test, predictor = pred_test, quiet = TRUE, direction = "<"), error = function(e) NULL)
   
@@ -339,7 +340,7 @@ create_roc_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, mo
   )
   roc_data <- dplyr::bind_rows(roc_val_df, roc_test_df)
   
-  ggplot(roc_data, aes(x = fpr, y = tpr, color = split)) +
+  p <- ggplot(roc_data, aes(x = fpr, y = tpr, color = split)) +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
     geom_line(linewidth = 1.2, alpha = 0.9) +
     scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
@@ -353,10 +354,36 @@ create_roc_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, mo
     coord_equal() +
     theme_nature() +
     theme(legend.position = "right")
+  if (!is.null(threshold_adj) && is.finite(threshold_adj)) {
+    pred_class <- ifelse(pred_test >= threshold_adj, 1, 0)
+    tp <- sum(pred_class == 1 & truth_test == 1)
+    tn <- sum(pred_class == 0 & truth_test == 0)
+    fp <- sum(pred_class == 1 & truth_test == 0)
+    fn <- sum(pred_class == 0 & truth_test == 1)
+    sensitivity <- tp / max(tp + fn, 1)
+    specificity <- tn / max(tn + fp, 1)
+    roc_point <- data.frame(
+      fpr = 1 - specificity,
+      tpr = sensitivity,
+      split = "Test"
+    )
+    p <- p +
+      geom_point(data = roc_point, aes(x = fpr, y = tpr), color = "black", size = 2) +
+      geom_text(
+        data = roc_point,
+        aes(x = fpr, y = tpr, label = sprintf("%s=%.3f", threshold_label, threshold_adj)),
+        color = "black",
+        hjust = -0.1,
+        vjust = -0.5,
+        size = 3
+      )
+  }
+  p
 }
 
 #' Create PR curve plot
-create_pr_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, model_name) {
+create_pr_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, model_name,
+                                 threshold_adj = NULL, threshold_label = "Youden") {
   pr_val <- tryCatch(ROCR::prediction(pred_val, truth_val), error = function(e) NULL)
   pr_test <- tryCatch(ROCR::prediction(pred_test, truth_test), error = function(e) NULL)
   
@@ -380,7 +407,7 @@ create_pr_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, mod
   pr_data <- dplyr::bind_rows(pr_val_df, pr_test_df)
   baseline <- mean(c(truth_val, truth_test))
   
-  ggplot(pr_data, aes(x = recall, y = precision, color = split)) +
+  p <- ggplot(pr_data, aes(x = recall, y = precision, color = split)) +
     geom_hline(yintercept = baseline, linetype = "dashed", color = "gray50") +
     geom_line(linewidth = 1.2, alpha = 0.9) +
     scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
@@ -394,6 +421,30 @@ create_pr_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, mod
     coord_cartesian(ylim = c(0, 1)) +
     theme_nature() +
     theme(legend.position = "right")
+  if (!is.null(threshold_adj) && is.finite(threshold_adj)) {
+    pred_class <- ifelse(pred_test >= threshold_adj, 1, 0)
+    tp <- sum(pred_class == 1 & truth_test == 1)
+    fp <- sum(pred_class == 1 & truth_test == 0)
+    fn <- sum(pred_class == 0 & truth_test == 1)
+    precision <- tp / max(tp + fp, 1)
+    recall <- tp / max(tp + fn, 1)
+    pr_point <- data.frame(
+      recall = recall,
+      precision = precision,
+      split = "Test"
+    )
+    p <- p +
+      geom_point(data = pr_point, aes(x = recall, y = precision), color = "black", size = 2) +
+      geom_text(
+        data = pr_point,
+        aes(x = recall, y = precision, label = sprintf("%s=%.3f", threshold_label, threshold_adj)),
+        color = "black",
+        hjust = -0.1,
+        vjust = -0.5,
+        size = 3
+      )
+  }
+  p
 }
 
 #' Create calibration plot
@@ -1923,48 +1974,100 @@ bart_val_fit <- BART::pbart(
 bart_val_pred <- as.numeric(bart_val_fit$prob.test.mean)
 
 #-------------------------------------------------------------------------------
-# 4. ROC Curves for all models
+# 3.5 Thresholds for adjusted performance (Youden)
 #-------------------------------------------------------------------------------
 
-roc_glmnet <- create_roc_curve_plot(glmnet_val_pred, val_df$tumor_stage_binary, 
-                                     glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET")
-roc_rf <- create_roc_curve_plot(rf_val_pred, val_df$tumor_stage_binary, 
-                                 rf_test_pred, test_df$tumor_stage_binary, "DR-RF")
-roc_bart <- create_roc_curve_plot(bart_val_pred, val_df$tumor_stage_binary, 
-                                   bart_test_pred, test_df$tumor_stage_binary, "DR-BART")
-
-if (!is.null(roc_glmnet)) {
-  ggsave(file.path(plots_dir, "roc_curve_glmnet.png"), roc_glmnet, width = 7, height = 6, dpi = 600)
-}
-if (!is.null(roc_rf)) {
-  ggsave(file.path(plots_dir, "roc_curve_rf.png"), roc_rf, width = 7, height = 6, dpi = 600)
-}
-if (!is.null(roc_bart)) {
-  ggsave(file.path(plots_dir, "roc_curve_bart.png"), roc_bart, width = 7, height = 6, dpi = 600)
-}
-cat("Saved: ROC curves for all models\n")
+youden_glmnet <- compute_youden_threshold(glmnet_test_pred, test_df$tumor_stage_binary)
+youden_rf <- compute_youden_threshold(rf_test_pred, test_df$tumor_stage_binary)
+youden_bart <- compute_youden_threshold(bart_test_pred, test_df$tumor_stage_binary)
 
 #-------------------------------------------------------------------------------
-# 5. PR Curves for all models
+# 4. ROC Curves for all models (default and adjusted thresholds)
 #-------------------------------------------------------------------------------
 
-pr_glmnet <- create_pr_curve_plot(glmnet_val_pred, val_df$tumor_stage_binary, 
-                                   glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET")
-pr_rf <- create_pr_curve_plot(rf_val_pred, val_df$tumor_stage_binary, 
-                               rf_test_pred, test_df$tumor_stage_binary, "DR-RF")
-pr_bart <- create_pr_curve_plot(bart_val_pred, val_df$tumor_stage_binary, 
-                                 bart_test_pred, test_df$tumor_stage_binary, "DR-BART")
+roc_glmnet_youden <- create_roc_curve_plot(glmnet_val_pred, val_df$tumor_stage_binary, 
+                                           glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET",
+                                           threshold_adj = youden_glmnet$threshold, threshold_label = "Youden")
+roc_rf_youden <- create_roc_curve_plot(rf_val_pred, val_df$tumor_stage_binary, 
+                                       rf_test_pred, test_df$tumor_stage_binary, "DR-RF",
+                                       threshold_adj = youden_rf$threshold, threshold_label = "Youden")
+roc_bart_youden <- create_roc_curve_plot(bart_val_pred, val_df$tumor_stage_binary, 
+                                         bart_test_pred, test_df$tumor_stage_binary, "DR-BART",
+                                         threshold_adj = youden_bart$threshold, threshold_label = "Youden")
 
-if (!is.null(pr_glmnet)) {
-  ggsave(file.path(plots_dir, "pr_curve_glmnet.png"), pr_glmnet, width = 7, height = 6, dpi = 600)
+roc_glmnet_default <- create_roc_curve_plot(glmnet_val_pred, val_df$tumor_stage_binary, 
+                                            glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET",
+                                            threshold_adj = 0.5, threshold_label = "Default 0.5")
+roc_rf_default <- create_roc_curve_plot(rf_val_pred, val_df$tumor_stage_binary, 
+                                        rf_test_pred, test_df$tumor_stage_binary, "DR-RF",
+                                        threshold_adj = 0.5, threshold_label = "Default 0.5")
+roc_bart_default <- create_roc_curve_plot(bart_val_pred, val_df$tumor_stage_binary, 
+                                          bart_test_pred, test_df$tumor_stage_binary, "DR-BART",
+                                          threshold_adj = 0.5, threshold_label = "Default 0.5")
+
+if (!is.null(roc_glmnet_youden)) {
+  ggsave(file.path(plots_dir, "roc_curve_glmnet_youden.png"), roc_glmnet_youden, width = 7, height = 6, dpi = 600)
 }
-if (!is.null(pr_rf)) {
-  ggsave(file.path(plots_dir, "pr_curve_rf.png"), pr_rf, width = 7, height = 6, dpi = 600)
+if (!is.null(roc_rf_youden)) {
+  ggsave(file.path(plots_dir, "roc_curve_rf_youden.png"), roc_rf_youden, width = 7, height = 6, dpi = 600)
 }
-if (!is.null(pr_bart)) {
-  ggsave(file.path(plots_dir, "pr_curve_bart.png"), pr_bart, width = 7, height = 6, dpi = 600)
+if (!is.null(roc_bart_youden)) {
+  ggsave(file.path(plots_dir, "roc_curve_bart_youden.png"), roc_bart_youden, width = 7, height = 6, dpi = 600)
 }
-cat("Saved: PR curves for all models\n")
+if (!is.null(roc_glmnet_default)) {
+  ggsave(file.path(plots_dir, "roc_curve_glmnet_default0p5.png"), roc_glmnet_default, width = 7, height = 6, dpi = 600)
+}
+if (!is.null(roc_rf_default)) {
+  ggsave(file.path(plots_dir, "roc_curve_rf_default0p5.png"), roc_rf_default, width = 7, height = 6, dpi = 600)
+}
+if (!is.null(roc_bart_default)) {
+  ggsave(file.path(plots_dir, "roc_curve_bart_default0p5.png"), roc_bart_default, width = 7, height = 6, dpi = 600)
+}
+cat("Saved: ROC curves for all models (Youden and default)\n")
+
+#-------------------------------------------------------------------------------
+# 5. PR Curves for all models (default and adjusted thresholds)
+#-------------------------------------------------------------------------------
+
+pr_glmnet_youden <- create_pr_curve_plot(glmnet_val_pred, val_df$tumor_stage_binary, 
+                                         glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET",
+                                         threshold_adj = youden_glmnet$threshold, threshold_label = "Youden")
+pr_rf_youden <- create_pr_curve_plot(rf_val_pred, val_df$tumor_stage_binary, 
+                                     rf_test_pred, test_df$tumor_stage_binary, "DR-RF",
+                                     threshold_adj = youden_rf$threshold, threshold_label = "Youden")
+pr_bart_youden <- create_pr_curve_plot(bart_val_pred, val_df$tumor_stage_binary, 
+                                       bart_test_pred, test_df$tumor_stage_binary, "DR-BART",
+                                       threshold_adj = youden_bart$threshold, threshold_label = "Youden")
+
+pr_glmnet_default <- create_pr_curve_plot(glmnet_val_pred, val_df$tumor_stage_binary, 
+                                          glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET",
+                                          threshold_adj = 0.5, threshold_label = "Default 0.5")
+pr_rf_default <- create_pr_curve_plot(rf_val_pred, val_df$tumor_stage_binary, 
+                                      rf_test_pred, test_df$tumor_stage_binary, "DR-RF",
+                                      threshold_adj = 0.5, threshold_label = "Default 0.5")
+pr_bart_default <- create_pr_curve_plot(bart_val_pred, val_df$tumor_stage_binary, 
+                                        bart_test_pred, test_df$tumor_stage_binary, "DR-BART",
+                                        threshold_adj = 0.5, threshold_label = "Default 0.5")
+
+if (!is.null(pr_glmnet_youden)) {
+  ggsave(file.path(plots_dir, "pr_curve_glmnet_youden.png"), pr_glmnet_youden, width = 7, height = 6, dpi = 600)
+}
+if (!is.null(pr_rf_youden)) {
+  ggsave(file.path(plots_dir, "pr_curve_rf_youden.png"), pr_rf_youden, width = 7, height = 6, dpi = 600)
+}
+if (!is.null(pr_bart_youden)) {
+  ggsave(file.path(plots_dir, "pr_curve_bart_youden.png"), pr_bart_youden, width = 7, height = 6, dpi = 600)
+}
+if (!is.null(pr_glmnet_default)) {
+  ggsave(file.path(plots_dir, "pr_curve_glmnet_default0p5.png"), pr_glmnet_default, width = 7, height = 6, dpi = 600)
+}
+if (!is.null(pr_rf_default)) {
+  ggsave(file.path(plots_dir, "pr_curve_rf_default0p5.png"), pr_rf_default, width = 7, height = 6, dpi = 600)
+}
+if (!is.null(pr_bart_default)) {
+  ggsave(file.path(plots_dir, "pr_curve_bart_default0p5.png"), pr_bart_default, width = 7, height = 6, dpi = 600)
+}
+cat("Saved: PR curves for all models (Youden and default)\n")
 
 #-------------------------------------------------------------------------------
 # 6. Calibration Plots for all models
@@ -1983,24 +2086,30 @@ ggsave(file.path(plots_dir, "calibration_bart.png"), cal_bart, width = 7, height
 cat("Saved: Calibration plots for all models\n")
 
 #-------------------------------------------------------------------------------
-# 7. Confusion Matrices for test set (using Youden threshold)
+# 7. Confusion Matrices for test set (Youden and default thresholds)
 #-------------------------------------------------------------------------------
 
-youden_glmnet <- compute_youden_threshold(glmnet_test_pred, test_df$tumor_stage_binary)
-youden_rf <- compute_youden_threshold(rf_test_pred, test_df$tumor_stage_binary)
-youden_bart <- compute_youden_threshold(bart_test_pred, test_df$tumor_stage_binary)
-
 cm_glmnet <- create_confusion_matrix_plot(glmnet_test_pred, test_df$tumor_stage_binary, 
-                                           youden_glmnet$threshold, "DR-GLMNET", "Test", "Youden")
+                                          youden_glmnet$threshold, "DR-GLMNET", "Test", "Youden")
 cm_rf <- create_confusion_matrix_plot(rf_test_pred, test_df$tumor_stage_binary, 
-                                       youden_rf$threshold, "DR-RF", "Test", "Youden")
+                                      youden_rf$threshold, "DR-RF", "Test", "Youden")
 cm_bart <- create_confusion_matrix_plot(bart_test_pred, test_df$tumor_stage_binary, 
-                                         youden_bart$threshold, "DR-BART", "Test", "Youden")
+                                        youden_bart$threshold, "DR-BART", "Test", "Youden")
 
-ggsave(file.path(plots_dir, "confusion_matrix_glmnet.png"), cm_glmnet, width = 6, height = 5, dpi = 600)
-ggsave(file.path(plots_dir, "confusion_matrix_rf.png"), cm_rf, width = 6, height = 5, dpi = 600)
-ggsave(file.path(plots_dir, "confusion_matrix_bart.png"), cm_bart, width = 6, height = 5, dpi = 600)
-cat("Saved: Confusion matrices for all models\n")
+cm_glmnet_default <- create_confusion_matrix_plot(glmnet_test_pred, test_df$tumor_stage_binary, 
+                                                  0.5, "DR-GLMNET", "Test", "Default 0.5")
+cm_rf_default <- create_confusion_matrix_plot(rf_test_pred, test_df$tumor_stage_binary, 
+                                              0.5, "DR-RF", "Test", "Default 0.5")
+cm_bart_default <- create_confusion_matrix_plot(bart_test_pred, test_df$tumor_stage_binary, 
+                                                0.5, "DR-BART", "Test", "Default 0.5")
+
+ggsave(file.path(plots_dir, "confusion_matrix_glmnet_youden.png"), cm_glmnet, width = 6, height = 5, dpi = 600)
+ggsave(file.path(plots_dir, "confusion_matrix_rf_youden.png"), cm_rf, width = 6, height = 5, dpi = 600)
+ggsave(file.path(plots_dir, "confusion_matrix_bart_youden.png"), cm_bart, width = 6, height = 5, dpi = 600)
+ggsave(file.path(plots_dir, "confusion_matrix_glmnet_default0p5.png"), cm_glmnet_default, width = 6, height = 5, dpi = 600)
+ggsave(file.path(plots_dir, "confusion_matrix_rf_default0p5.png"), cm_rf_default, width = 6, height = 5, dpi = 600)
+ggsave(file.path(plots_dir, "confusion_matrix_bart_default0p5.png"), cm_bart_default, width = 6, height = 5, dpi = 600)
+cat("Saved: Confusion matrices for all models (Youden and default)\n")
 
 #-------------------------------------------------------------------------------
 # 8. Comprehensive Metrics Table
@@ -2012,11 +2121,17 @@ comprehensive_metrics <- dplyr::bind_rows(
   compute_classification_metrics(rf_test_pred, test_df$tumor_stage_binary, youden_rf$threshold) %>%
     dplyr::mutate(model = "DR-RF", threshold_type = "Youden", threshold = youden_rf$threshold),
   compute_classification_metrics(bart_test_pred, test_df$tumor_stage_binary, youden_bart$threshold) %>%
-    dplyr::mutate(model = "DR-BART", threshold_type = "Youden", threshold = youden_bart$threshold)
+    dplyr::mutate(model = "DR-BART", threshold_type = "Youden", threshold = youden_bart$threshold),
+  compute_classification_metrics(glmnet_test_pred, test_df$tumor_stage_binary, 0.5) %>%
+    dplyr::mutate(model = "DR-GLMNET", threshold_type = "Default0.5", threshold = 0.5),
+  compute_classification_metrics(rf_test_pred, test_df$tumor_stage_binary, 0.5) %>%
+    dplyr::mutate(model = "DR-RF", threshold_type = "Default0.5", threshold = 0.5),
+  compute_classification_metrics(bart_test_pred, test_df$tumor_stage_binary, 0.5) %>%
+    dplyr::mutate(model = "DR-BART", threshold_type = "Default0.5", threshold = 0.5)
 )
 
-print("Comprehensive classification metrics (test set, Youden threshold):")
-print(comprehensive_metrics %>% dplyr::select(model, accuracy, balanced_accuracy, precision, recall, specificity, f1, roc_auc, pr_auc))
+print("Comprehensive classification metrics (test set, Youden and default thresholds):")
+print(comprehensive_metrics %>% dplyr::select(model, threshold_type, threshold, accuracy, balanced_accuracy, precision, recall, specificity, f1, roc_auc, pr_auc))
 
 write.csv(comprehensive_metrics, file.path(plots_dir, "comprehensive_metrics.csv"), row.names = FALSE)
 cat("Saved: Comprehensive metrics CSV\n")
@@ -2215,6 +2330,3 @@ cat(sprintf("\n=== All visualization plots saved to: %s ===\n\n", plots_dir))
 # The splitting is typically done randomly while ensuring that the distribution of key variables (e.g., tumor stage) is maintained across the subsets. Each subset is used for specific purposes in the analysis pipeline, allowing for robust model training, validation, and testing to ensure reliable and generalizable results. All models fitted adopt cross-fitting to mitigate overfitting and enhance causal effect estimation. Stratified folds are created based on the binary tumor stage outcome to ensure balanced representation in each fold during cross-validation. This approach helps to ensure that the models are trained and evaluated on diverse subsets of the data, leading to more robust and reliable findings.
 # 4. Reporting and Interpretation: The results from each split are reported separately, allowing for a comprehensive understanding of the model's performance and the estimated treatment effects across different data subsets. This approach provides insights into the generalizability of the findings and helps to identify any potential discrepancies between the splits.
 # 5. Exploratory Full-Data Fit: An additional exploratory analysis is conducted by pooling all data (train, validation, and test) to fit the models and estimate treatment effects. This pooled analysis is clearly labeled as exploratory since it does not maintain an untouched test set for confirmatory claims. The results from this full-data fit provide additional insights but should be interpreted with caution due to the lack of a separate test set.
-
-
-
