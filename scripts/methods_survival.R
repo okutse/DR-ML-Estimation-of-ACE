@@ -381,29 +381,14 @@ cs <- cs %>% dplyr::mutate(`HER2 Status` = dplyr::na_if(`HER2 Status`, "")) %>%
               tumor_size = `Tumor Size`,
               tumor_stg = `Tumor Stage`,
               tmb_nonsynonymous = `TMB (nonsynonymous)`) %>% 
-  # add binarized tumor stage from levels levels(as.factor(cs$`Tumor Stage`)) "0" "1" "2" "3" "4"
+  # Create tumor_stage variable (for covariate use only, not outcome)
   dplyr::mutate(tumor_stage = as.factor(case_when(
     str_detect(tumor_stg, "0|1")  ~ "early",
     str_detect(tumor_stg, "2|3|4") ~ "late",
     TRUE ~ NA_character_
   ))) %>% 
-  # add observability mask for tumor stage (1 = observed, 0 = missing) to address missing outcome data
+  # add observability mask for tumor stage
   dplyr::mutate(tumor_stage_mask = if_else(!is.na(tumor_stage), 1, 0)) %>% 
-  # add inverse weights for tumor stage to address class imbalance
-  dplyr::mutate(tumor_stage_invwt = case_when(
-    tumor_stage == "early" ~ 1 / sum(tumor_stage == "early", na.rm = TRUE),
-    tumor_stage == "late" ~ 1 / sum(tumor_stage == "late", na.rm = TRUE),
-    TRUE ~ NA_real_
-  )) %>%
-  # Prepare survival outcome variables (OS_MONTHS, OS_STATUS)
-  dplyr::mutate(
-    OS_MONTHS = as.numeric(overall_survival_months),
-    OS_STATUS_BINARY = case_when(
-      overall_survival_status == "1:DECEASED" ~ 1,
-      overall_survival_status == "0:LIVING" ~ 0,
-      TRUE ~ NA_real_
-    )
-  ) %>% 
   # add ER status mask (1 = observed, 0 = missing) to address missing confounder data
   dplyr::mutate(er_status_mask = if_else(!is.na(er_status), 1, 0)) %>% 
   # convert covariates to factors
@@ -482,8 +467,17 @@ dplyr::mutate(
               nottingham_prognostic_index = as.numeric(nottingham_prognostic_index),
               cohort = as.numeric(cohort),
               overall_survival_months = as.numeric(overall_survival_months), 
-              relapse_free_status_months = as.numeric(relapse_free_status_months) 
-              ) #%>% 
+              relapse_free_status_months = as.numeric(relapse_free_status_months)
+              ) %>%
+  # Prepare survival outcome variables for DML analysis
+  dplyr::mutate(
+    OS_MONTHS = overall_survival_months,  # Already converted to numeric above
+    OS_STATUS_BINARY = case_when(
+      overall_survival_status == "1:DECEASED" ~ 1,
+      overall_survival_status == "0:LIVING" ~ 0,
+      TRUE ~ NA_real_
+    )
+  ) 
 
 
 # loop to check and create masks for all columns in cp with missing data
@@ -542,9 +536,7 @@ cat(sprintf("Event rate: %.1f%% (n=%d deaths)\n",
     mean(dt2$OS_STATUS_BINARY == 1) * 100, 
     sum(dt2$OS_STATUS_BINARY == 1)))
 cat("dt2 columns:", paste(colnames(dt2), collapse=", "), "\n")
-exp_mat <- exp_mat[, dt2$patient_id, drop = FALSE] # keep only subjects with observed tumor stage to align ids
-grp <- factor(dt2$tumor_stage, levels = c("early", "late")) # early = 1338; late = 128; n = 1466 samples
-table(grp)
+exp_mat <- exp_mat[, dt2$patient_id, drop = FALSE] # keep only subjects with complete survival data to align ids
 
 # check whether exp_mat are already normalized log2 (range is 0 to 16)
 summary(as.numeric(exp_mat))
@@ -734,28 +726,47 @@ train_plot_df <- data.frame(
 ## keep genes with at least 20% samples having expression > 1 (z-score)
 keep_genes <- apply(expr_train, 1, function(x) sum(x > 1) >= 0.2 * length(x))
 dt_train_all <- clinical_splits$train
-stage_complete <- !is.na(dt_train_all$tumor_stage)
-dt_train <- dt_train_all[stage_complete, , drop = FALSE]
+
+# Filter to samples with complete survival pseudo-outcome (Y_pseudo) for pathway ranking
+outcome_complete <- !is.na(dt_train_all$Y_pseudo)
+cat(sprintf("dt_train_all samples with Y_pseudo: %d out of %d\n", 
+    sum(outcome_complete), nrow(dt_train_all)))
+
+if (sum(outcome_complete) == 0) {
+  stop("No samples with Y_pseudo found in training set. Check if Y_pseudo was computed correctly.")
+}
+
+dt_train <- dt_train_all[outcome_complete, , drop = FALSE]
 
 expr_train_stage <- expr_train[, dt_train$patient_id, drop = FALSE]
 expr_filt <- expr_train_stage[keep_genes, , drop = FALSE]
 
-grp_train <- factor(dt_train$tumor_stage, levels = c("early", "late"))
-stopifnot(length(grp_train) == ncol(expr_filt))
+# DEG analysis using survival outcome (Event vs Censored) instead of tumor stage
+# Filter to samples with complete OS_STATUS_BINARY
+outcome_status_complete <- !is.na(dt_train$OS_STATUS_BINARY)
+dt_train_deg <- dt_train[outcome_status_complete, , drop = FALSE]
+expr_filt_deg <- expr_filt[, dt_train_deg$patient_id, drop = FALSE]
 
-design <- stats::model.matrix(~ grp_train) # keep groups for IDs in train set only
-fit <- limma::lmFit(expr_filt, design)
+grp_train <- factor(dt_train_deg$OS_STATUS_BINARY, levels = c(0, 1), labels = c("Censored", "Event"))
+cat(sprintf("DEG analysis: %d Censored, %d Event\n", 
+    sum(grp_train == "Censored"), sum(grp_train == "Event")))
+stopifnot(length(grp_train) == ncol(expr_filt_deg))
+
+design <- stats::model.matrix(~ grp_train) # Event vs Censored
+fit <- limma::lmFit(expr_filt_deg, design)
 fit <- limma::eBayes(fit)
-fit$genes <- data.frame(gene = rownames(expr_filt))
+fit$genes <- data.frame(gene = rownames(expr_filt_deg))
 
-# limma results: Late vs Early 
+# limma results: Event vs Censored
 res_limma <- limma::topTable(
   fit,
-  coef = "grp_trainlate",
+  coef = "grp_trainEvent",
   number = Inf,
   adjust.method = "BH"
 ) %>%
   as.data.frame()
+
+cat("\n=== DEG Analysis Summary (Event vs Censored) ===\n")
 
 # argument on cutoff selection. note the small estimated effects overall. The middle 50% of logFC is roughly 
 # [−0.024, 0.027], and the most extreme values are only about −0.95 to +1.01
@@ -782,8 +793,8 @@ res_annot <- res_limma %>%
       TRUE              ~ "None"
     ),
     deg_class = case_when(
-      adj.P.Val < alpha_fdr & logFC >=  lfc_cut ~ "Upregulated",
-      adj.P.Val < alpha_fdr & logFC <= -lfc_cut ~ "Downregulated",
+      adj.P.Val < alpha_fdr & logFC >=  lfc_cut ~ "Upregulated in Event",
+      adj.P.Val < alpha_fdr & logFC <= -lfc_cut ~ "Downregulated in Event",
       TRUE                                  ~ "Not significant"
     )
   )
@@ -807,15 +818,15 @@ length(deg_genes)
 deg_genes_up   <- deg_limma_selected %>% filter(logFC >=  lfc_cut) %>% pull(gene)
 deg_genes_down <- deg_limma_selected %>% filter(logFC <= -lfc_cut) %>% pull(gene)
 
-# Table of up and down regulated DEGs
+# Table of up and down regulated DEGs (Event vs Censored)
 deg_tbl_up <- deg_limma_selected %>%
-  filter(deg_class == "Upregulated") %>%
+  filter(deg_class == "Upregulated in Event") %>%
   arrange(adj.P.Val, desc(logFC)) %>%
   dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
   slice_head(n = 10)
 
 deg_tbl_down <- deg_limma_selected %>%
-  filter(deg_class == "Downregulated") %>%
+  filter(deg_class == "Downregulated in Event") %>%
   arrange(adj.P.Val, logFC) %>%   # most negative first
   dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
   slice_head(n = 10)
@@ -837,7 +848,7 @@ volcano_data <- res_annot
 # For Not significant: top N by a stable "extremeness" score
 label_data <- bind_rows(
   volcano_data %>%
-    filter(deg_class %in% c("Upregulated", "Downregulated")) %>%
+    filter(deg_class %in% c("Upregulated in Event", "Downregulated in Event")) %>%
     arrange(desc(abs(logFC))) %>%
     group_by(deg_class) %>%
     slice_head(n = top_n_sig) %>%
@@ -850,7 +861,7 @@ label_data <- bind_rows(
 )
 volcano_data$deg_class <- factor(
   volcano_data$deg_class,
-  levels = c("Upregulated", "Downregulated", "Not significant")
+  levels = c("Upregulated in Event", "Downregulated in Event", "Not significant")
 )
 
 volcano_plot <- ggplot(volcano_data, aes(x = logFC, y = neglog10_adjP, color = as.factor(deg_class))) +
@@ -867,13 +878,13 @@ volcano_plot <- ggplot(volcano_data, aes(x = logFC, y = neglog10_adjP, color = a
     segment.alpha = 0.6
   ) +
   scale_color_manual(values = c(
-    "Upregulated"     = "red",
-    "Downregulated"   = "blue",
+    "Upregulated in Event"     = "red",
+    "Downregulated in Event"   = "blue",
     "Not significant" = "black"
   )) +
   labs(
-    title = "(a)", #Volcano plot of DEGs in late vs early breast cancer tumor stages
-    x = "log2 Fold Change (Late vs Early)",
+    title = "(a) Volcano plot of DEGs in Event vs Censored patients",
+    x = "log2 Fold Change (Event vs Censored)",
     y = "-log10(FDR)",
     color = "DEG class"
   ) +
@@ -902,20 +913,22 @@ if (!length(top_genes)) {
   stop("No DEG genes overlap with expression matrix after filtering; cannot proceed to downstream analyses.")
 }
 
-## Expression of top DEGs
-exp_top <- expr_splits$train[top_genes, dt_train$patient_id, drop = FALSE]
+## Expression of top DEGs by survival outcome
+exp_top <- expr_splits$train[top_genes, dt_train_deg$patient_id, drop = FALSE]
 exp_top_df <- as.data.frame(t(exp_top)) %>%
   dplyr::mutate(patient_id = rownames(.)) %>%
-  dplyr::left_join(dt_train %>% dplyr::select(patient_id, tumor_stage), by = "patient_id") %>%
+  dplyr::left_join(dt_train_deg %>% dplyr::select(patient_id, OS_STATUS_BINARY), by = "patient_id") %>%
+  dplyr::mutate(outcome_group = factor(OS_STATUS_BINARY, levels = c(0, 1), labels = c("Censored", "Event"))) %>%
   tidyr::pivot_longer(cols = all_of(top_genes), names_to = "gene", values_to = "expression")
 
-## Boxplots of top DEGs expression by tumor stage 
-boxplot_top_degs <- ggplot(exp_top_df, aes(x = tumor_stage, y = expression, fill = tumor_stage)) +
+## Boxplots of top DEGs expression by survival outcome
+boxplot_top_degs <- ggplot(exp_top_df, aes(x = outcome_group, y = expression, fill = outcome_group)) +
   geom_boxplot() +
   facet_wrap(~ gene, scales = "free_y") +
-  labs(title = "(b)", # Expression of top DEGs by breast cancer tumor stage [not strictly necessary except to show distributions]
-       x = "Tumor Stage",
+  labs(title = "(b) Expression of top DEGs by Survival Outcome",
+       x = "Survival Outcome",
        y = "Expression scores") +
+  scale_fill_manual(values = c("Censored" = "#63A375", "Event" = "#E4572E")) +
   theme(legend.position = "none")+
   theme_nature()
 boxplot_top_degs
@@ -964,12 +977,16 @@ if (!length(bc_gene_sets)) {
 }
 
 train_ids <- colnames(expr_splits$train)
-train_stage <- dt_train$tumor_stage[match(train_ids, dt_train$patient_id)]
-stage_factor <- factor(train_stage)
+# Use Y_pseudo (RMST pseudo-outcome) for pathway ranking instead of tumor stage
+train_outcome <- dt_train$Y_pseudo[match(train_ids, dt_train$patient_id)]
 
-if (any(is.na(stage_factor)) || length(unique(stage_factor)) < 2) {
-  stop("Tumor stage labels are missing or have fewer than two groups; cannot rank pathways.")
+if (any(is.na(train_outcome)) || length(unique(train_outcome)) < 5) {
+  stop("RMST pseudo-outcome is missing or has insufficient variation; cannot rank pathways.")
 }
+
+cat("\n=== GSVA Pathway Ranking Based on RMST Pseudo-outcome ===\n")
+cat(sprintf("Using Y_pseudo (RMST) for pathway ranking: mean=%.2f, SD=%.2f\n", 
+    mean(train_outcome, na.rm=TRUE), sd(train_outcome, na.rm=TRUE)))
 
 gsva_rank_param <- GSVA::gsvaParam(
   exprData = expr_splits$train,
@@ -980,44 +997,57 @@ gsva_rank_param <- GSVA::gsvaParam(
 )
 gsva_rank_scores <- GSVA::gsva(gsva_rank_param)
 
-mean_early <- matrixStats::rowMeans2(gsva_rank_scores[, stage_factor == "early", drop = FALSE])
-mean_late <- matrixStats::rowMeans2(gsva_rank_scores[, stage_factor == "late", drop = FALSE])
-delta <- mean_late - mean_early
+# Use correlation with RMST pseudo-outcome instead of group comparison
+corr_vals <- apply(gsva_rank_scores, 1, function(pathway_scores) {
+  cor(pathway_scores, train_outcome, use = "pairwise.complete.obs")
+})
 
-pvals <- apply(gsva_rank_scores, 1, function(x) {
-  stats::t.test(x[stage_factor == "late"], x[stage_factor == "early"])$p.value
+# Calculate mean GSVA scores for high vs low RMST (for descriptive purposes)
+rmst_median <- median(train_outcome, na.rm = TRUE)
+high_rmst_mask <- train_outcome >= rmst_median
+low_rmst_mask <- train_outcome < rmst_median
+
+mean_high_rmst <- matrixStats::rowMeans2(gsva_rank_scores[, high_rmst_mask, drop = FALSE])
+mean_low_rmst <- matrixStats::rowMeans2(gsva_rank_scores[, low_rmst_mask, drop = FALSE])
+delta <- mean_high_rmst - mean_low_rmst
+
+# P-values from correlation test
+pvals <- apply(gsva_rank_scores, 1, function(pathway_scores) {
+  test_result <- cor.test(pathway_scores, train_outcome, use = "pairwise.complete.obs")
+  test_result$p.value
 })
 
 gsva_rank_tbl <- data.frame(
   ID = rownames(gsva_rank_scores),
-  mean_early = mean_early,
-  mean_late = mean_late,
-  delta = delta,
+  correlation = corr_vals,  # Correlation with RMST pseudo-outcome
+  mean_high_rmst = mean_high_rmst,
+  mean_low_rmst = mean_low_rmst,
+  delta = delta,  # High RMST - Low RMST
   p_value = pvals,
   p_adjust = stats::p.adjust(pvals, method = "BH"),
   stringsAsFactors = FALSE
 ) %>%
-  dplyr::arrange(p_adjust, desc(abs(delta)))
+  dplyr::arrange(p_adjust, desc(abs(correlation)))  # Rank by p-value and correlation strength
 
 gsva_top_tbl <- gsva_rank_tbl %>%
   dplyr::slice_head(n = 10)
 
-print("Top GSVA-ranked pathways:")
+cat("\n=== Top GSVA-ranked pathways by correlation with RMST ===\n")
 print(gsva_top_tbl)
 
 gsva_plot_df <- gsva_rank_tbl %>%
   dplyr::slice_head(n = 15) %>%
-  dplyr::mutate(ID = stats::reorder(ID, delta))
+  dplyr::mutate(ID = stats::reorder(ID, correlation))
 
-gsva_rank_plot <- ggplot(gsva_plot_df, aes(x = delta, y = ID, size = abs(delta), color = -log10(p_adjust))) +
+gsva_rank_plot <- ggplot(gsva_plot_df, aes(x = correlation, y = ID, size = abs(correlation), color = -log10(p_adjust))) +
   geom_point(alpha = 0.85) +
   scale_color_gradient(low = "#97C4BC", high = "#1F78B4", name = "-log10 adj p") +
   labs(
     title = "Breast cancer relevant GSVA ranking",
-    subtitle = "Top pathways by GSVA score contrast (late vs early)",
-    x = "GSVA score delta (late - early)",
+    subtitle = "Top pathways by correlation with RMST (survival outcome)",
+    x = "Correlation with RMST pseudo-outcome",
     y = NULL,
-    size = "Absolute delta"
+    size = "Absolute correlation"
   ) +
   theme_nature()
 gsva_rank_plot
