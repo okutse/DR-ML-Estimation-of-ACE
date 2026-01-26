@@ -1,5 +1,5 @@
 # Title: Doubly-robust machine learning estimation of the average causal effect of (selected) DEGs on breast cancer stage and survival outcomes
-# Author: Amos Okutse
+# Author: Amos Okutse, Ian Liu
 # Date: Jan 2025
 
 
@@ -7,7 +7,6 @@
 #(1) DR Penalized Logistic Regression
 #(2) DR Random Forest
 #(3) DR BART
-#(4) DR Logistic regression on categorized DEGs (low, mid, high expression levels based on quantiles)
 
 ## Load required packages
 required_pkgs <- c("msigdbr", "GSVA", "ranger", "pROC")
