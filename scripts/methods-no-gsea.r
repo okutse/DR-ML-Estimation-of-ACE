@@ -2,6 +2,12 @@
 # Author: Amos Okutse
 # Date: Jan 2025
 
+# =============================================================================
+# Global Figure Parameters
+# =============================================================================
+FIGURE_WIDTH <- 10   # inches
+FIGURE_HEIGHT <- 5   # inches
+FIGURE_DPI <- 600    # resolution
 
 # Comparative Methods:
 #(1) DR Penalized Logistic Regression
@@ -91,7 +97,7 @@ next_fig_path <- function(filename, dir = ".") {
 
 # Plot export shape: "rect" (default), "square", or "free".
 plot_export_shape <- "rect"
-rect_export_size <- c(width = 10, height = 5)
+rect_export_size <- c(width = FIGURE_WIDTH, height = FIGURE_HEIGHT)
 save_plot <- function(..., shape = plot_export_shape, rect_size = rect_export_size) {
   args <- list(...)
   shape <- match.arg(shape, c("rect", "square", "free"))
