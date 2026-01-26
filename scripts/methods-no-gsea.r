@@ -89,20 +89,32 @@ next_fig_path <- function(filename, dir = ".") {
   file.path(dir, sprintf("[%s]%s", label, filename))
 }
 
-# Toggle to export plots as squares (width == height).
-square_plot_exports <- TRUE
-save_plot <- function(..., square = square_plot_exports) {
+# Plot export shape: "rect" (default), "square", or "free".
+plot_export_shape <- "rect"
+rect_export_size <- c(width = 10, height = 5)
+save_plot <- function(..., shape = plot_export_shape, rect_size = rect_export_size) {
   args <- list(...)
-  if (isTRUE(square)) {
+  shape <- match.arg(shape, c("rect", "square", "free"))
+  if (shape == "square") {
     if (!"width" %in% names(args)) {
-      args$width <- 6
+      args$width <- 7
     }
     if (!"height" %in% names(args)) {
-      args$height <- 6
+      args$height <- 7
     }
     side <- max(as.numeric(args$width), as.numeric(args$height), na.rm = TRUE)
     args$width <- side
     args$height <- side
+  } else if (shape == "rect") {
+    ratio <- rect_size["width"] / rect_size["height"]
+    if (!"width" %in% names(args) && !"height" %in% names(args)) {
+      args$width <- rect_size["width"]
+      args$height <- rect_size["height"]
+    } else if ("width" %in% names(args) && !"height" %in% names(args)) {
+      args$height <- as.numeric(args$width) / ratio
+    } else if (!"width" %in% names(args) && "height" %in% names(args)) {
+      args$width <- as.numeric(args$height) * ratio
+    }
   }
   do.call(ggplot2::ggsave, args)
 }
@@ -375,7 +387,7 @@ create_roc_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, mo
     geom_line(linewidth = 1.2, alpha = 0.9) +
     scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
     labs(
-      title = sprintf("ROC Curve: %s", model_name),
+      title = sprintf("ROC Curve for Tumor Stage Prediction: %s", model_name),
       subtitle = sprintf("Val AUC: %.3f | Test AUC: %.3f", as.numeric(roc_val$auc), as.numeric(roc_test$auc)),
       x = "1 - Specificity (False Positive Rate)",
       y = "Sensitivity (True Positive Rate)",
@@ -442,7 +454,7 @@ create_pr_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, mod
     geom_line(linewidth = 1.2, alpha = 0.9) +
     scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
     labs(
-      title = sprintf("Precision-Recall Curve: %s", model_name),
+      title = sprintf("Precision-Recall Curve for Tumor Stage Prediction: %s", model_name),
       subtitle = sprintf("Baseline (class proportion): %.3f", baseline),
       x = "Recall (Sensitivity)",
       y = "Precision (Positive Predictive Value)",
@@ -491,7 +503,7 @@ create_calibration_plot <- function(pred_val, truth_val, pred_test, truth_test, 
     scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
     scale_size_continuous(range = c(2, 8), name = "N obs") +
     labs(
-      title = sprintf("Calibration Plot: %s", model_name),
+      title = sprintf("Calibration Plot for Tumor Stage Prediction: %s", model_name),
       subtitle = "Perfect calibration lies on the diagonal",
       x = "Mean Predicted Probability",
       y = "Observed Proportion",
@@ -1249,7 +1261,7 @@ volcano_plot <- ggplot(volcano_data, aes(x = logFC, y = neglog10_adjP, color = a
   )) +
   labs(
     title = "(a)", #Volcano plot of DEGs in late vs early breast cancer tumor stages
-    x = "log2 Fold Change (Late vs Early)",
+    x = "log2 Fold Change (Late vs Early Stage)",
     y = "-log10(FDR)",
     color = "DEG class"
   ) +
@@ -1400,7 +1412,7 @@ gsva_rank_plot <- ggplot(gsva_plot_df, aes(x = delta, y = ID, size = abs(delta),
   scale_size_continuous(range = c(3, 8), name = "Absolute delta") +
   labs(
     title = "Breast cancer relevant GSVA ranking",
-    subtitle = "Top pathways by GSVA score contrast (late vs early)",
+    subtitle = "Top pathways by GSVA score contrast (late vs early stage)",
     x = "GSVA score delta (late - early)",
     y = NULL,
     size = "Absolute delta"
@@ -2094,7 +2106,7 @@ if (nrow(dml_split_tbl)) {
     scale_color_manual(values = c("DR-BART" = "#56B4E9", "DR-GLMNET" = "#E69F00", "DR-RF" = "#009E73")) +
     scale_shape_manual(values = c("CV Split" = 16, "Full Data" = 17)) +
     labs(
-      title = "Model Stability Across Data Splits",
+      title = "Model Stability of Tumor Stage Prediction Across Data Splits",
       subtitle = "Consistent estimates indicate robust causal effect",
       x = "Data Split",
       y = expression(paste("Treatment Effect Estimate (", theta, ")")),
@@ -2135,7 +2147,7 @@ if (nrow(model_metrics)) {
               position = position_dodge(width = 0.8), vjust = -0.5, size = 3.5) +
     scale_fill_manual(values = c("ROC-AUC" = "#2166AC", "C-Index" = "#B2182B")) +
     labs(
-      title = "Model Performance Comparison (Test Set)",
+      title = "Model Performance Comparison (Test Set) for Tumor Stage Prediction",
       x = "Model",
       y = "Metric Value",
       fill = "Metric"
@@ -2183,6 +2195,35 @@ bart_val_fit <- BART::pbart(
   sparse = TRUE
 )
 bart_val_pred <- as.numeric(bart_val_fit$prob.test.mean)
+
+# Training predictions for per-split metrics
+train_cov_df <- apply_imputer(train_df, cov_imputer_trainval)
+X_train_cov <- model.matrix(cov_formula, data = train_cov_df)
+X_train_full <- cbind(pathway_score = train_df$pathway_score, X_train_cov)
+glmnet_train_pred <- as.numeric(stats::predict(glmnet_classifier, newx = X_train_full, s = "lambda.min", type = "response"))
+
+rf_train_pred_mat <- predict(rf_classifier, data = apply_imputer(train_df, rf_imputer))$predictions
+rf_train_pred <- if (is.matrix(rf_train_pred_mat)) {
+  as.numeric(rf_train_pred_mat[, "1", drop = TRUE])
+} else {
+  as.numeric(rf_train_pred_mat)
+}
+
+bart_train_fit <- BART::pbart(
+  x.train = X_trainval_full,
+  y.train = trainval_df$tumor_stage_binary,
+  x.test = X_train_full,
+  ntree = 200,
+  ndpost = 1500,
+  nskip = 500,
+  usequants = TRUE,
+  sparse = TRUE
+)
+bart_train_pred <- as.numeric(bart_train_fit$prob.test.mean)
+
+glmnet_full_pred <- c(glmnet_train_pred, glmnet_val_pred, glmnet_test_pred)
+rf_full_pred <- c(rf_train_pred, rf_val_pred, rf_test_pred)
+bart_full_pred <- c(bart_train_pred, bart_val_pred, bart_test_pred)
 
 #-------------------------------------------------------------------------------
 # 4.5 Thresholds for adjusted performance (Youden)
@@ -2326,23 +2367,43 @@ cat("Saved: Confusion matrices for all models (Youden and default)\n")
 # 9. Comprehensive Metrics Table
 #-------------------------------------------------------------------------------
 
-comprehensive_metrics <- dplyr::bind_rows(
-  compute_classification_metrics(glmnet_test_pred, test_df$tumor_stage_binary, youden_glmnet$threshold) %>%
-    dplyr::mutate(model = "DR-GLMNET", threshold_type = "Youden", threshold = youden_glmnet$threshold),
-  compute_classification_metrics(rf_test_pred, test_df$tumor_stage_binary, youden_rf$threshold) %>%
-    dplyr::mutate(model = "DR-RF", threshold_type = "Youden", threshold = youden_rf$threshold),
-  compute_classification_metrics(bart_test_pred, test_df$tumor_stage_binary, youden_bart$threshold) %>%
-    dplyr::mutate(model = "DR-BART", threshold_type = "Youden", threshold = youden_bart$threshold),
-  compute_classification_metrics(glmnet_test_pred, test_df$tumor_stage_binary, 0.5) %>%
-    dplyr::mutate(model = "DR-GLMNET", threshold_type = "Default0.5", threshold = 0.5),
-  compute_classification_metrics(rf_test_pred, test_df$tumor_stage_binary, 0.5) %>%
-    dplyr::mutate(model = "DR-RF", threshold_type = "Default0.5", threshold = 0.5),
-  compute_classification_metrics(bart_test_pred, test_df$tumor_stage_binary, 0.5) %>%
-    dplyr::mutate(model = "DR-BART", threshold_type = "Default0.5", threshold = 0.5)
-)
+compute_split_metrics <- function(pred, truth, model_name, split_label) {
+  youden <- compute_youden_threshold(pred, truth)
+  auc_tbl <- compute_classification_metrics(pred, truth, 0.5)
+  dplyr::bind_rows(
+    compute_metrics_at_threshold(pred, truth, youden$threshold, threshold_name = "Youden"),
+    compute_metrics_at_threshold(pred, truth, 0.5, threshold_name = "Default0.5")
+  ) %>%
+    dplyr::mutate(
+      roc_auc = auc_tbl$roc_auc,
+      pr_auc = auc_tbl$pr_auc,
+      model = model_name,
+      split = split_label
+    )
+}
 
-print("Comprehensive classification metrics (test set, Youden and default thresholds):")
-print(comprehensive_metrics %>% dplyr::select(model, threshold_type, threshold, accuracy, balanced_accuracy, precision, recall, specificity, f1, roc_auc, pr_auc))
+comprehensive_metrics <- dplyr::bind_rows(
+  compute_split_metrics(glmnet_train_pred, train_df$tumor_stage_binary, "DR-GLMNET", "Train"),
+  compute_split_metrics(glmnet_val_pred, val_df$tumor_stage_binary, "DR-GLMNET", "Validation"),
+  compute_split_metrics(glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET", "Test"),
+  compute_split_metrics(glmnet_full_pred, full_df$tumor_stage_binary, "DR-GLMNET", "All"),
+  compute_split_metrics(rf_train_pred, train_df$tumor_stage_binary, "DR-RF", "Train"),
+  compute_split_metrics(rf_val_pred, val_df$tumor_stage_binary, "DR-RF", "Validation"),
+  compute_split_metrics(rf_test_pred, test_df$tumor_stage_binary, "DR-RF", "Test"),
+  compute_split_metrics(rf_full_pred, full_df$tumor_stage_binary, "DR-RF", "All"),
+  compute_split_metrics(bart_train_pred, train_df$tumor_stage_binary, "DR-BART", "Train"),
+  compute_split_metrics(bart_val_pred, val_df$tumor_stage_binary, "DR-BART", "Validation"),
+  compute_split_metrics(bart_test_pred, test_df$tumor_stage_binary, "DR-BART", "Test"),
+  compute_split_metrics(bart_full_pred, full_df$tumor_stage_binary, "DR-BART", "All")
+) %>%
+  dplyr::select(
+    threshold_type, threshold,
+    accuracy, balanced_accuracy, precision, recall, sensitivity, specificity, f1,
+    tp, tn, fp, fn, roc_auc, pr_auc, model, split
+  )
+
+print("Comprehensive classification metrics by split (Youden + Default0.5 thresholds):")
+print(comprehensive_metrics)
 
 write.csv(comprehensive_metrics, file.path(plots_dir, "comprehensive_metrics.csv"), row.names = FALSE)
 cat("Saved: Comprehensive metrics CSV\n")
@@ -2364,7 +2425,7 @@ pred_dist_plot <- ggplot(pred_dist_df, aes(x = pred, y = model, fill = truth_lab
   geom_density_ridges(alpha = 0.7, scale = 1.2, rel_min_height = 0.01) +
   scale_fill_manual(values = c("Early" = "#4DAF4A", "Late" = "#E41A1C")) +
   labs(
-    title = "Predicted Probability Distributions by True Class",
+    title = "Predicted Probability Distributions of Tumor Stage Predictions by True Class",
     subtitle = "Test set predictions across models",
     x = "Predicted Probability (Late Stage)",
     y = "Model",
@@ -2396,7 +2457,7 @@ sensitivity_forest_plot <- ggplot(sensitivity_comparison, aes(x = theta, y = mod
   geom_point(size = 3, position = position_dodge(width = 0.4)) +
   scale_color_manual(values = c("Full" = "#2166AC", "Clinical-only" = "#B2182B")) +
   labs(
-    title = "Sensitivity Analysis: Effect of Covariate Set",
+    title = "Sensitivity Analysis for Tumor Stage Prediction: Effect of Covariate Set",
     subtitle = "Comparing full covariate set vs clinical-only (train split)",
     x = expression(paste("Estimated Effect (", theta, ")")),
     y = "Model",
@@ -2484,7 +2545,7 @@ if (!is.null(roc_glmnet_obj) && !is.null(roc_rf_obj) && !is.null(roc_bart_obj)) 
     geom_line(linewidth = 1.2, alpha = 0.9) +
     scale_color_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A")) +
     labs(
-      title = "ROC Curves: All Models (Test Set)",
+      title = "ROC Curves for Tumor Stage Prediction: All Models (Test Set)",
       x = "1 - Specificity (False Positive Rate)",
       y = "Sensitivity (True Positive Rate)",
       color = "Model"
