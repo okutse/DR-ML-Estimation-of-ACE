@@ -1278,9 +1278,9 @@ volcano_plot
 save_plot(
   filename = next_fig_path("limma_deg_volcano_plot.png", dir = "results/5-fold-results"),
   plot = volcano_plot,
-  width = 6,
-  height = 5,
-  dpi = 600
+  width = FIGURE_WIDTH,
+  height = FIGURE_HEIGHT,
+  dpi = FIGURE_DPI
 )
 
 # Top DEG genes for downstream analyses (fallback to overall top-ranked genes if up/down tables are empty)
@@ -1316,9 +1316,9 @@ boxplot_top_degs
 # save the 600 dpi image in results folder
 save_plot(boxplot_top_degs,
        filename = next_fig_path("top_degs_boxplot.png", dir = "results/5-fold-results"),
-       width = 8,
-       height = 6,
-       dpi = 600
+       width = FIGURE_WIDTH,
+       height = FIGURE_HEIGHT,
+       dpi = FIGURE_DPI
 )
 
 #################################################################################
@@ -1616,9 +1616,9 @@ gsva_density_plot
 save_plot(
   filename = next_fig_path("gsva_distribution_by_stage_train.png", dir = "results/5-fold-results"),
   plot = gsva_density_plot,
-  width = 7,
-  height = 5,
-  dpi = 600
+  width = FIGURE_WIDTH,
+  height = FIGURE_HEIGHT,
+  dpi = FIGURE_DPI
 )
 
 nonsynonymous_classes <- c(
@@ -2052,9 +2052,9 @@ if (nrow(dml_split_tbl)) {
   save_plot(
     filename = next_fig_path("dr_effect_forest_plot.png", dir = plots_dir),
     plot = dr_forest_plot,
-    width = 10,
-    height = 6,
-    dpi = 600
+    width = FIGURE_WIDTH,
+    height = FIGURE_HEIGHT,
+    dpi = FIGURE_DPI
   )
   cat("Saved: DR effect forest plot\n")
 }
@@ -2125,9 +2125,9 @@ if (nrow(dml_split_tbl)) {
   save_plot(
     filename = next_fig_path("stability_across_splits.png", dir = plots_dir),
     plot = stability_plot,
-    width = 10,
-    height = 7,
-    dpi = 600
+    width = FIGURE_WIDTH,
+    height = FIGURE_HEIGHT,
+    dpi = FIGURE_DPI
   )
   cat("Saved: Model stability across splits plot\n")
 }
@@ -2165,9 +2165,9 @@ if (nrow(model_metrics)) {
   save_plot(
     filename = next_fig_path("model_performance_comparison.png", dir = plots_dir),
     plot = performance_bar_plot,
-    width = 8,
-    height = 6,
-    dpi = 600
+    width = FIGURE_WIDTH,
+    height = FIGURE_HEIGHT,
+    dpi = FIGURE_DPI
   )
   cat("Saved: Model performance comparison bar plot\n")
 }
@@ -2264,22 +2264,22 @@ roc_bart_default <- create_roc_curve_plot(bart_val_pred, val_df$tumor_stage_bina
                                           threshold_adj = 0.5, threshold_label = "Default 0.5")
 
 if (!is.null(roc_glmnet_youden)) {
-  save_plot(next_fig_path("roc_curve_glmnet_youden.png", dir = plots_dir), roc_glmnet_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_glmnet_youden.png", dir = plots_dir), roc_glmnet_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 if (!is.null(roc_rf_youden)) {
-  save_plot(next_fig_path("roc_curve_rf_youden.png", dir = plots_dir), roc_rf_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_rf_youden.png", dir = plots_dir), roc_rf_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 if (!is.null(roc_bart_youden)) {
-  save_plot(next_fig_path("roc_curve_bart_youden.png", dir = plots_dir), roc_bart_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_bart_youden.png", dir = plots_dir), roc_bart_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 if (!is.null(roc_glmnet_default)) {
-  save_plot(next_fig_path("roc_curve_glmnet_default0p5.png", dir = plots_dir), roc_glmnet_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_glmnet_default0p5.png", dir = plots_dir), roc_glmnet_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 if (!is.null(roc_rf_default)) {
-  save_plot(next_fig_path("roc_curve_rf_default0p5.png", dir = plots_dir), roc_rf_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_rf_default0p5.png", dir = plots_dir), roc_rf_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 if (!is.null(roc_bart_default)) {
-  save_plot(next_fig_path("roc_curve_bart_default0p5.png", dir = plots_dir), roc_bart_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_bart_default0p5.png", dir = plots_dir), roc_bart_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 cat("Saved: ROC curves for all models (Youden and default)\n")
 
@@ -2308,22 +2308,22 @@ pr_bart_default <- create_pr_curve_plot(bart_val_pred, val_df$tumor_stage_binary
                                         threshold_adj = 0.5, threshold_label = "Default 0.5")
 
 if (!is.null(pr_glmnet_youden)) {
-  save_plot(next_fig_path("pr_curve_glmnet_youden.png", dir = plots_dir), pr_glmnet_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_glmnet_youden.png", dir = plots_dir), pr_glmnet_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 if (!is.null(pr_rf_youden)) {
-  save_plot(next_fig_path("pr_curve_rf_youden.png", dir = plots_dir), pr_rf_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_rf_youden.png", dir = plots_dir), pr_rf_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 if (!is.null(pr_bart_youden)) {
-  save_plot(next_fig_path("pr_curve_bart_youden.png", dir = plots_dir), pr_bart_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_bart_youden.png", dir = plots_dir), pr_bart_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 if (!is.null(pr_glmnet_default)) {
-  save_plot(next_fig_path("pr_curve_glmnet_default0p5.png", dir = plots_dir), pr_glmnet_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_glmnet_default0p5.png", dir = plots_dir), pr_glmnet_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 if (!is.null(pr_rf_default)) {
-  save_plot(next_fig_path("pr_curve_rf_default0p5.png", dir = plots_dir), pr_rf_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_rf_default0p5.png", dir = plots_dir), pr_rf_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 if (!is.null(pr_bart_default)) {
-  save_plot(next_fig_path("pr_curve_bart_default0p5.png", dir = plots_dir), pr_bart_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_bart_default0p5.png", dir = plots_dir), pr_bart_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 }
 cat("Saved: PR curves for all models (Youden and default)\n")
 
@@ -2338,9 +2338,9 @@ cal_rf <- create_calibration_plot(rf_val_pred, val_df$tumor_stage_binary,
 cal_bart <- create_calibration_plot(bart_val_pred, val_df$tumor_stage_binary, 
                                      bart_test_pred, test_df$tumor_stage_binary, "DR-BART")
 
-save_plot(next_fig_path("calibration_glmnet.png", dir = plots_dir), cal_glmnet, width = 7, height = 6, dpi = 600)
-save_plot(next_fig_path("calibration_rf.png", dir = plots_dir), cal_rf, width = 7, height = 6, dpi = 600)
-save_plot(next_fig_path("calibration_bart.png", dir = plots_dir), cal_bart, width = 7, height = 6, dpi = 600)
+save_plot(next_fig_path("calibration_glmnet.png", dir = plots_dir), cal_glmnet, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+save_plot(next_fig_path("calibration_rf.png", dir = plots_dir), cal_rf, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+save_plot(next_fig_path("calibration_bart.png", dir = plots_dir), cal_bart, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
 cat("Saved: Calibration plots for all models\n")
 
 #-------------------------------------------------------------------------------
@@ -2585,26 +2585,3 @@ if (exists("dr_forest_plot") && exists("combined_roc_plot") && exists("gsva_viol
 cat(sprintf("\n=== All visualization plots saved to: %s ===\n\n", plots_dir))
 
 
-#################################################################################
-# Q: Describe the model fitting approach described in this pipeline. What are the key components and steps involved in the analysis?
-# A: In this pipeline, the model fitting approach involves several key components and steps to analyze the relationship between gene expression data and breast cancer tumor stages. The main steps include: 
-# 1. Data Preprocessing: The gene expression data is preprocessed using z-score normalization to standardize the expression levels across samples. This step ensures that the data is on a comparable scale for downstream analyses.
-# 2. Differential Expression Analysis: The limma-voom method is employed to identify differentially expressed genes (DEGs) between early and late tumor stages. Genes are filtered based on expression levels, and statistical tests are performed to determine significant DEGs.
-# 3. GSVA-driven pathway ranking: GSVA scores are computed for MSigDB gene sets using GSVA's built-in ranking,
-#    and pathways are ranked by the GSVA score contrast between tumor stages.
-# 4. Pathway Activity Scoring: The GSVA method is used to compute pathway activity scores for each sample based
-#    on the selected pathway from the GSVA ranking. This step quantifies the activity of specific pathways
-#    associated with tumor stages.
-# 5. Covariate Assembly: Clinical and genomic covariates are assembled alongside the pathway activity scores. This includes variables such as age, tumor size, hormone receptor status, mutation burden, and methylation levels.
-# 6. Doubly Robust Estimation: The DML (Doubly Machine Learning) approach is applied to estimate the causal effect of pathway activity on tumor stage while adjusting for covariates. Different machine learning models (e.g., GLMNET, Random Forest, BART) are used as nuisance learners to model the outcome and treatment. 
-# 7. Sensitivity Analysis: A sensitivity analysis is conducted by removing genomic covariates and re-estimating the treatment effect using only clinical covariates. This step assesses the robustness of the findings to different sets of covariates. 
-# Overall, the pipeline integrates statistical modeling, machine learning, and biological interpretation to investigate the relationship between gene expression, pathway activity, and breast cancer tumor stages.
-
-# Explain the data splitting strategy used in this analysis. How are the training, validation, and test sets defined and utilized?
-# A: The data splitting strategy in this analysis involves dividing the dataset into three distinct subsets: training, validation, and test sets.
-# 1. Training Set: The training set is used to fit the models and estimate the parameters. It includes a portion of the data that is representative of the overall dataset. The training set is utilized for tasks such as differential expression analysis, fitting machine learning models for outcome and treatment, and estimating the causal effects using the DML approach.
-# 2. Validation Set: The validation set is used to tune model hyperparameters and select the best-performing models. It serves as an intermediate evaluation step to prevent overfitting to the training data. The validation set is employed to assess the performance of different models (e.g., GLM NET, Random Forest) and select the optimal model based on metrics such as AUC and concordance index. 
-# 3. Test Set: The test set is reserved for the final evaluation of the selected models. It is not used during the model fitting or selection process, ensuring an unbiased assessment of model performance. The test set is utilized to compute predictive performance metrics (AUC and concordance index) for the final models and to report the doubly robust estimates of the treatment effect on tumor stage. 
-# The splitting is typically done randomly while ensuring that the distribution of key variables (e.g., tumor stage) is maintained across the subsets. Each subset is used for specific purposes in the analysis pipeline, allowing for robust model training, validation, and testing to ensure reliable and generalizable results. All models fitted adopt cross-fitting to mitigate overfitting and enhance causal effect estimation. Stratified folds are created based on the binary tumor stage outcome to ensure balanced representation in each fold during cross-validation. This approach helps to ensure that the models are trained and evaluated on diverse subsets of the data, leading to more robust and reliable findings.
-# 4. Reporting and Interpretation: The results from each split are reported separately, allowing for a comprehensive understanding of the model's performance and the estimated treatment effects across different data subsets. This approach provides insights into the generalizability of the findings and helps to identify any potential discrepancies between the splits.
-# 5. Exploratory Full-Data Fit: An additional exploratory analysis is conducted by pooling all data (train, validation, and test) to fit the models and estimate treatment effects. This pooled analysis is clearly labeled as exploratory since it does not maintain an untouched test set for confirmatory claims. The results from this full-data fit provide additional insights but should be interpreted with caution due to the lack of a separate test set.
