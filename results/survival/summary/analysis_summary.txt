@@ -1,0 +1,69 @@
+=================================================================
+Doubly Robust Machine Learning Analysis Summary
+Analysis Date: 2026-01-25 18:16:44 
+=================================================================
+
+SELECTED PATHWAY:
+  ID: HALLMARK_G2M_CHECKPOINT 
+  Label: HALLMARK_G2M_CHECKPOINT 
+  Correlation with RMST: -0.2476 
+  Adjusted p-value: <2e-16 
+
+MAIN RESULTS (Test Set):
+# A tibble: 3 × 6
+  split model     theta    se ci_lower ci_upper
+  <chr> <chr>     <dbl> <dbl>    <dbl>    <dbl>
+1 test  DR-Cox    -6.57  8.17    -22.6     9.44
+2 test  DR-RSF    -5.51  7.74    -20.7     9.66
+3 test  DR-GLMNET -3.99  7.77    -19.2    11.2 
+
+FULL DATA ESTIMATES (Exploratory):
+# A tibble: 3 × 6
+  split model     theta    se ci_lower ci_upper
+  <chr> <chr>     <dbl> <dbl>    <dbl>    <dbl>
+1 all   DR-Cox    -13.2  3.18    -19.5    -7.00
+2 all   DR-RSF    -13.9  3.11    -20.0    -7.78
+3 all   DR-GLMNET -12.7  3.11    -18.8    -6.55
+
+SENSITIVITY ANALYSIS (Clinical covariates only):
+# A tibble: 1 × 4
+  model     theta ci_lower ci_upper
+  <chr>     <dbl>    <dbl>    <dbl>
+1 DR-GLMNET -14.0    -21.2    -6.90
+
+MODEL STABILITY ACROSS SPLITS:
+# A tibble: 3 × 5
+  model     mean_theta sd_theta cv_theta mean_se
+  <chr>          <dbl>    <dbl>    <dbl>   <dbl>
+1 DR-Cox         -13.5     6.16     45.7    6.70
+2 DR-GLMNET      -13.0     8.06     62.2    6.48
+3 DR-RSF         -14.4     8.33     57.9    6.35
+
+MODEL PREDICTION PERFORMANCE (Test Set):
+Note: Metrics assess nuisance function quality, not causal estimation.
+
+      model    cindex auc_60m auc_120m metric_type
+1    DR-Cox 0.3216859      NA       NA    Survival
+2    DR-RSF 0.3216859      NA       NA    Survival
+3 DR-GLMNET 0.3216859      NA       NA        RMST
+
+DR-GLMNET RMST Prediction:
+               model  rsquared correlation rmse_months
+lambda.min DR-GLMNET 0.2296873   0.4874515    30.97077
+           mae_months
+lambda.min   25.34977
+
+Treatment Model (RF) Performance:
+         model        target  rsquared correlation      rmse
+1 RF-Treatment Pathway Score 0.2847694    0.534191 0.2528782
+
+INTERPRETATION:
+  Treatment Effect (theta): Change in RMST (months) per 1-unit increase in pathway score
+  Negative theta indicates pathway activity is associated with shorter survival
+  All models use K=5 cross-fitting to prevent overfitting
+  Unified Random Forest treatment learner for fair comparison
+  
+  C-index: Concordance index for survival prediction (>0.7 excellent, >0.6 good)
+  AUC: Time-dependent area under ROC curve at specified timepoints
+  R²: Proportion of variance explained in RMST prediction
+  Higher prediction performance → More efficient (lower SE) causal estimates
