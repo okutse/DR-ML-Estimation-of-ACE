@@ -23,3 +23,12 @@ To reproduce the findings in this study, follow these steps:
 4. **Model Training and Evaluation**: Run the main analysis scripts to train the models and evaluate the causal effects.
 5. **Results Visualization**: Use the scripts provided in the `scripts/` directory to visualize the results.
 6. **Review Results**: Check the `results/` directory for output figures and tables. 
+
+## Contact
+For any questions or issues, please contact:
+
+(1) [Amos Okutse](amos_okutse@brown.edu)
+
+(2) [Ian Liu](ian_y_liu@brown.edu)
+
+(3) [Man-Fang Liang](man-fang_liang@brown.edu)
