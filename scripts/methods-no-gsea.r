@@ -1452,9 +1452,9 @@ gsva_rank_plot
 save_plot(
   filename = next_fig_path("gsva_ranking_plot.png", dir = "results/5-fold-results"),
   plot = gsva_rank_plot,
-  width = 8,
-  height = 6,
-  dpi = 600
+  width = FIGURE_WIDTH,
+  height = FIGURE_HEIGHT,
+  dpi = FIGURE_DPI
 )
 
 gsva_top5_df <- gsva_rank_tbl %>%
@@ -1502,9 +1502,9 @@ gsva_rank_plot_top5
 save_plot(
   filename = next_fig_path("gsva_ranking_plot_top5.png", dir = "results/5-fold-results"),
   plot = gsva_rank_plot_top5,
-  width = 8,
-  height = 6,
-  dpi = 600
+  width = FIGURE_WIDTH,
+  height = FIGURE_HEIGHT,
+  dpi = FIGURE_DPI
 )
 
 selected_pathway <- gsva_rank_tbl %>% dplyr::slice_head(n = 1)
@@ -2560,7 +2560,7 @@ if (!is.null(roc_glmnet_obj) && !is.null(roc_rf_obj) && !is.null(roc_bart_obj)) 
     theme_nature() +
     theme(legend.position = "bottom")
   
-  save_plot(next_fig_path("combined_roc_curves.png", dir = plots_dir), combined_roc_plot, width = 8, height = 7, dpi = 600)
+  save_plot(next_fig_path("combined_roc_curves.png", dir = plots_dir), combined_roc_plot, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
   cat("Saved: Combined ROC curves\n")
 }
 
@@ -2578,7 +2578,7 @@ if (exists("dr_forest_plot") && exists("combined_roc_plot") && exists("gsva_viol
     label_size = 14
   )
   
-  save_plot(next_fig_path("summary_panel.png", dir = plots_dir), summary_panel, width = 10, height = 14, dpi = 600)
+  save_plot(next_fig_path("summary_panel.png", dir = plots_dir), summary_panel, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
   cat("Saved: Summary panel\n")
 }
 
