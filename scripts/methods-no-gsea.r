@@ -70,6 +70,9 @@ source("scripts/helper.R")
 # Helper utilities used across the workflow
 # -----------------------------------------------------------------------------
 
+# Default inner plot text size (axis/legend/strip text, not titles)
+plot_text_size <- 16
+
 theme_nature <- function(base_size = 11, base_family = "Helvetica") {
   ggplot2::theme_minimal(base_size = base_size, base_family = base_family) +
     ggplot2::theme(
@@ -78,6 +81,9 @@ theme_nature <- function(base_size = 11, base_family = "Helvetica") {
       plot.title = ggplot2::element_text(face = "bold", size = base_size + 2),
       plot.subtitle = ggplot2::element_text(color = "#4A4A4A"),
       axis.title = ggplot2::element_text(face = "bold"),
+      axis.text = ggplot2::element_text(size = plot_text_size),
+      legend.text = ggplot2::element_text(size = plot_text_size),
+      strip.text = ggplot2::element_text(size = plot_text_size),
       legend.position = "right",
       legend.title = ggplot2::element_text(face = "bold")
     )
@@ -2264,22 +2270,22 @@ roc_bart_default <- create_roc_curve_plot(bart_val_pred, val_df$tumor_stage_bina
                                           threshold_adj = 0.5, threshold_label = "Default 0.5")
 
 if (!is.null(roc_glmnet_youden)) {
-  save_plot(next_fig_path("roc_curve_glmnet_youden.png", dir = plots_dir), roc_glmnet_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("roc_curve_glmnet_youden.png", dir = plots_dir), roc_glmnet_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
 }
 if (!is.null(roc_rf_youden)) {
-  save_plot(next_fig_path("roc_curve_rf_youden.png", dir = plots_dir), roc_rf_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("roc_curve_rf_youden.png", dir = plots_dir), roc_rf_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
 }
 if (!is.null(roc_bart_youden)) {
-  save_plot(next_fig_path("roc_curve_bart_youden.png", dir = plots_dir), roc_bart_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("roc_curve_bart_youden.png", dir = plots_dir), roc_bart_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
 }
 if (!is.null(roc_glmnet_default)) {
-  save_plot(next_fig_path("roc_curve_glmnet_default0p5.png", dir = plots_dir), roc_glmnet_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("roc_curve_glmnet_default0p5.png", dir = plots_dir), roc_glmnet_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
 }
 if (!is.null(roc_rf_default)) {
-  save_plot(next_fig_path("roc_curve_rf_default0p5.png", dir = plots_dir), roc_rf_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("roc_curve_rf_default0p5.png", dir = plots_dir), roc_rf_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
 }
 if (!is.null(roc_bart_default)) {
-  save_plot(next_fig_path("roc_curve_bart_default0p5.png", dir = plots_dir), roc_bart_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("roc_curve_bart_default0p5.png", dir = plots_dir), roc_bart_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
 }
 cat("Saved: ROC curves for all models (Youden and default)\n")
 
@@ -2308,22 +2314,22 @@ pr_bart_default <- create_pr_curve_plot(bart_val_pred, val_df$tumor_stage_binary
                                         threshold_adj = 0.5, threshold_label = "Default 0.5")
 
 if (!is.null(pr_glmnet_youden)) {
-  save_plot(next_fig_path("pr_curve_glmnet_youden.png", dir = plots_dir), pr_glmnet_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("pr_curve_glmnet_youden.png", dir = plots_dir), pr_glmnet_youden, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
 }
 if (!is.null(pr_rf_youden)) {
-  save_plot(next_fig_path("pr_curve_rf_youden.png", dir = plots_dir), pr_rf_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("pr_curve_rf_youden.png", dir = plots_dir), pr_rf_youden, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
 }
 if (!is.null(pr_bart_youden)) {
-  save_plot(next_fig_path("pr_curve_bart_youden.png", dir = plots_dir), pr_bart_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("pr_curve_bart_youden.png", dir = plots_dir), pr_bart_youden, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
 }
 if (!is.null(pr_glmnet_default)) {
-  save_plot(next_fig_path("pr_curve_glmnet_default0p5.png", dir = plots_dir), pr_glmnet_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("pr_curve_glmnet_default0p5.png", dir = plots_dir), pr_glmnet_default, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
 }
 if (!is.null(pr_rf_default)) {
-  save_plot(next_fig_path("pr_curve_rf_default0p5.png", dir = plots_dir), pr_rf_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("pr_curve_rf_default0p5.png", dir = plots_dir), pr_rf_default, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
 }
 if (!is.null(pr_bart_default)) {
-  save_plot(next_fig_path("pr_curve_bart_default0p5.png", dir = plots_dir), pr_bart_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("pr_curve_bart_default0p5.png", dir = plots_dir), pr_bart_default, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
 }
 cat("Saved: PR curves for all models (Youden and default)\n")
 
@@ -2560,7 +2566,7 @@ if (!is.null(roc_glmnet_obj) && !is.null(roc_rf_obj) && !is.null(roc_bart_obj)) 
     theme_nature() +
     theme(legend.position = "bottom")
   
-  save_plot(next_fig_path("combined_roc_curves.png", dir = plots_dir), combined_roc_plot, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  save_plot(next_fig_path("combined_roc_curves.png", dir = plots_dir), combined_roc_plot, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI)
   cat("Saved: Combined ROC curves\n")
 }
 
@@ -2583,5 +2589,4 @@ if (exists("dr_forest_plot") && exists("combined_roc_plot") && exists("gsva_viol
 }
 
 cat(sprintf("\n=== All visualization plots saved to: %s ===\n\n", plots_dir))
-
 
