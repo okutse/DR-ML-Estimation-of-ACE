@@ -2,6 +2,12 @@
 # Author: Amos Okutse, Man-Fang Liang
 # Date: Jan 2025
 
+# =============================================================================
+# Global Figure Parameters
+# =============================================================================
+FIGURE_WIDTH <- 10   # inches
+FIGURE_HEIGHT <- 5   # inches
+FIGURE_DPI <- 600    # resolution
 
 # Comparative Methods for Survival Analysis:
 # (1) DR-Cox: Cox proportional hazards model for outcome prediction
@@ -967,18 +973,12 @@ train_plot_df <- data.frame(
 # train_preprocessing_check <- cowplot::plot_grid(p_train_raw, p_train_processed, ncol = 2)
 
 #################################################################################
-## DEG identification using limma-voom and edgeR on training set only
+## DEG identification using limma-voom on training set (binary RMST stratification)
 ###################################################################################
-# NOTE: DEG analysis commented out due to volcano plot rendering issues
-#       (viewport zero dimension / font family errors on Windows)
-#       This section is independent from downstream GSVA pathway analysis
-# 
-# # keep genes with at least 20% samples having expression > 1 (z-score)
-# keep_genes <- apply(expr_train, 1, function(x) sum(x > 1) >= 0.2 * length(x))
-# dt_train_all <- clinical_splits$train
-# 
-# # Filter to samples with complete survival pseudo-outcome (Y_pseudo) for pathway ranking
-# outcome_complete <- !is.na(clinical_splits$train$Y_pseudo)
+# NOTE: Using binary RMST outcome (high vs low survival) instead of Event/Censored
+#       to identify differentially expressed genes
+
+# Filter to samples with complete survival pseudo-outcome (Y_pseudo)
 dt_train_all <- clinical_splits$train
 outcome_complete <- !is.na(dt_train_all$Y_pseudo)
 cat(sprintf("dt_train_all samples with Y_pseudo: %d out of %d\n", 
@@ -990,207 +990,267 @@ if (sum(outcome_complete) == 0) {
 
 dt_train <- dt_train_all[outcome_complete, , drop = FALSE]
 
-# expr_train_stage <- expr_train[, dt_train$patient_id, drop = FALSE]
-# expr_filt <- expr_train_stage[keep_genes, , drop = FALSE]
-# 
-# # DEG analysis using survival outcome (Event vs Censored) instead of tumor stage
-# # Filter to samples with complete OS_STATUS_BINARY
-# outcome_status_complete <- !is.na(dt_train$OS_STATUS_BINARY)
-# dt_train_deg <- dt_train[outcome_status_complete, , drop = FALSE]
-# expr_filt_deg <- expr_filt[, dt_train_deg$patient_id, drop = FALSE]
-# 
-# grp_train <- factor(dt_train_deg$OS_STATUS_BINARY, levels = c(0, 1), labels = c("Censored", "Event"))
-# cat(sprintf("DEG analysis: %d Censored, %d Event\n", 
-#     sum(grp_train == "Censored"), sum(grp_train == "Event")))
-# stopifnot(length(grp_train) == ncol(expr_filt_deg))
-# 
-# design <- stats::model.matrix(~ grp_train) # Event vs Censored
-# fit <- limma::lmFit(expr_filt_deg, design)
-# fit <- limma::eBayes(fit)
-# fit$genes <- data.frame(gene = rownames(expr_filt_deg))
-# 
-# # limma results: Event vs Censored
-# res_limma <- limma::topTable(
-#   fit,
-#   coef = "grp_trainEvent",
-#   number = Inf,
-#   adjust.method = "BH"
-# ) %>%
-#   as.data.frame()
-# 
-# cat("\n=== DEG Analysis Summary (Event vs Censored) ===\n")
-# 
-# # argument on cutoff selection. note the small estimated effects overall. The middle 50% of logFC is roughly 
-# # [−0.024, 0.027], and the most extreme values are only about −0.95 to +1.01
-# summary(res_limma)
-# 
-# # thresholds
-# alpha_fdr <- 0.10 # conservative for exploratory analysis
-# lfc_cut   <- 0.2          # ~1.15-fold
-# top_n_sig <- 10
-# top_n_nsig <- 10
-# 
-# # pull rownames in as gene IDs
-# if (!"gene" %in% colnames(res_limma)) {
-#   res_limma <- res_limma %>% tibble::rownames_to_column("gene")
-# }
-# 
-# # annotate direction + DEG class on the same dataset
-# res_annot <- res_limma %>%
-#   mutate(
-#     neglog10_adjP = -log10(adj.P.Val),
-#     direction = case_when(
-#       logFC >=  lfc_cut ~ "Up",
-#       logFC <= -lfc_cut ~ "Down",
-#       TRUE              ~ "None"
-#     ),
-#     deg_class = case_when(
-#       adj.P.Val < alpha_fdr & logFC >=  lfc_cut ~ "Upregulated in Event",
-#       adj.P.Val < alpha_fdr & logFC <= -lfc_cut ~ "Downregulated in Event",
-#       TRUE                                  ~ "Not significant"
-#     )
-#   )
-# 
-# # select DEGs for downstream (GSVA / pathway enrichment / causal) 
-# deg_limma_selected <- res_annot %>%
-#   filter(adj.P.Val < alpha_fdr, abs(logFC) >= lfc_cut) %>%
-#   arrange(adj.P.Val)
-# 
-# if (!nrow(deg_limma_selected)) {
-#   warning("No DEGs passed the specified FDR/logFC thresholds; using top 50 genes by adjusted p-value as a fallback.")
-#   deg_limma_selected <- res_annot %>%
-#     arrange(adj.P.Val) %>%
-#     slice_head(n = 50)
-# }
-# 
-# deg_genes <- deg_limma_selected$gene
-# length(deg_genes)
-# 
-# # Separate up vs down gene sets (useful for enrichment or signed analyses)
-# deg_genes_up   <- deg_limma_selected %>% filter(logFC >=  lfc_cut) %>% pull(gene)
-# deg_genes_down <- deg_limma_selected %>% filter(logFC <= -lfc_cut) %>% pull(gene)
-# 
-# # Table of up and down regulated DEGs (Event vs Censored)
-# deg_tbl_up <- deg_limma_selected %>%
-#   filter(deg_class == "Upregulated in Event") %>%
-#   arrange(adj.P.Val, desc(logFC)) %>%
-#   dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
-#   slice_head(n = 10)
-# 
-# deg_tbl_down <- deg_limma_selected %>%
-#   filter(deg_class == "Downregulated in Event") %>%
-#   arrange(adj.P.Val, logFC) %>%   # most negative first
-#   dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
-#   slice_head(n = 10)
-# 
-# deg_tbl <- bind_rows(deg_tbl_up, deg_tbl_down)
-# 
-# knitr::kable(
-#   deg_tbl,
-#   format = "latex",
-#   booktabs = TRUE,
-#   digits = 4,
-#   caption = "Top Upregulated and Downregulated DEGs identified by limma"
-# )
-# 
-# # Volcano plot with correct coloring for up, down, and non-sig genes with labels
-# volcano_data <- res_annot
-# # Label selection:
-# # For Up/Down: top N by abs(logFC)
-# # For Not significant: top N by a stable "extremeness" score
-# label_data <- bind_rows(
-#   volcano_data %>%
-#     filter(deg_class %in% c("Upregulated in Event", "Downregulated in Event")) %>%
-#     arrange(desc(abs(logFC))) %>%
-#     group_by(deg_class) %>%
-#     slice_head(n = top_n_sig) %>%
-#     ungroup(),
-#   volcano_data %>%
-#     filter(deg_class == "Not significant") %>%
-#     mutate(extremeness = neglog10_adjP * abs(logFC)) %>%
-#     arrange(desc(extremeness)) %>%
-#     slice_head(n = top_n_nsig)
-# )
-# volcano_data$deg_class <- factor(
-#   volcano_data$deg_class,
-#   levels = c("Upregulated in Event", "Downregulated in Event", "Not significant")
-# )
-# 
-# volcano_plot <- ggplot(volcano_data, aes(x = logFC, y = neglog10_adjP, color = as.factor(deg_class))) +
-#   geom_point(alpha = 0.6, size = 1.2) +
-#   geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", linewidth = 0.4) +
-#   geom_hline(yintercept = -log10(alpha_fdr), linetype = "dashed", linewidth = 0.4) +
-#   ggrepel::geom_text_repel(
-#     data = label_data,
-#     aes(label = gene),
-#     size = 3,
-#     max.overlaps = Inf,
-#     box.padding = 0.3,
-#     point.padding = 0.2,
-#     segment.alpha = 0.6
-#   ) +
-#   scale_color_manual(values = c(
-#     "Upregulated in Event"     = "red",
-#     "Downregulated in Event"   = "blue",
-#     "Not significant" = "black"
-#   )) +
-#   labs(
-#     title = "(a) Volcano plot of DEGs in Event vs Censored patients",
-#     x = "log2 Fold Change (Event vs Censored)",
-#     y = "-log10(FDR)",
-#     color = "DEG class"
-#   ) +
-#   theme_nature()
-# 
-# volcano_plot
-# # save the 600 dpi image in results folder
-# ggsave(
-#   filename = "results/[a]limma_deg_volcano_plot.png",
-#   plot = volcano_plot,
-#   width = 6,
-#   height = 5,
-#   dpi = 600
-# )
-# 
-# # Top DEG genes for downstream analyses (fallback to overall top-ranked genes if up/down tables are empty)
-# top_gene_candidates <- unique(c(deg_tbl_up$gene, deg_tbl_down$gene))
-# if (!length(top_gene_candidates)) {
-# top_gene_candidates <- deg_limma_selected %>%
-#     arrange(adj.P.Val) %>%
-#     pull(gene)
-# }
-# top_genes <- top_gene_candidates[top_gene_candidates %in% rownames(expr_splits$train)]
-# 
-# if (!length(top_genes)) {
-#   stop("No DEG genes overlap with expression matrix after filtering; cannot proceed to downstream analyses.")
-# }
-# 
-# ## Expression of top DEGs by survival outcome
-# exp_top <- expr_splits$train[top_genes, dt_train_deg$patient_id, drop = FALSE]
-# exp_top_df <- as.data.frame(t(exp_top)) %>%
-#   dplyr::mutate(patient_id = rownames(.)) %>%
-#   dplyr::left_join(dt_train_deg %>% dplyr::select(patient_id, OS_STATUS_BINARY), by = "patient_id") %>%
-#   dplyr::mutate(outcome_group = factor(OS_STATUS_BINARY, levels = c(0, 1), labels = c("Censored", "Event"))) %>%
-#   tidyr::pivot_longer(cols = all_of(top_genes), names_to = "gene", values_to = "expression")
-# 
-# ## Boxplots of top DEGs expression by survival outcome
-# boxplot_top_degs <- ggplot(exp_top_df, aes(x = outcome_group, y = expression, fill = outcome_group)) +
-#   geom_boxplot() +
-#   facet_wrap(~ gene, scales = "free_y") +
-#   labs(title = "(b) Expression of top DEGs by Survival Outcome",
-#        x = "Survival Outcome",
-#        y = "Expression scores") +
-#   scale_fill_manual(values = c("Censored" = "#63A375", "Event" = "#E4572E")) +
-#   theme(legend.position = "none")+
-#   theme_nature()
-# boxplot_top_degs
-# # save the 600 dpi image in results folder
-# ggsave(boxplot_top_degs,
-#        filename = "results/[b]top_degs_boxplot.png",
-#        width = 8,
-#        height = 6,
-#        dpi = 600
-# )
+cat("\n=== DEG Analysis (Binary RMST Stratification) ===\n")
+
+# Create binary RMST groups based on median
+rmst_median <- median(dt_train$Y_pseudo, na.rm = TRUE)
+dt_train$rmst_group <- ifelse(dt_train$Y_pseudo >= rmst_median, 
+                              "High_RMST", "Low_RMST")
+dt_train$rmst_group <- factor(dt_train$rmst_group, 
+                             levels = c("High_RMST", "Low_RMST"))
+
+cat(sprintf("RMST groups: %d High_RMST, %d Low_RMST (median = %.2f months)\n",
+    sum(dt_train$rmst_group == "High_RMST"), 
+    sum(dt_train$rmst_group == "Low_RMST"),
+    rmst_median))
+
+# Keep genes with at least 20% samples having expression > 1 (z-score)
+expr_train <- expr_splits$train
+keep_genes <- apply(expr_train, 1, function(x) sum(x > 1) >= 0.2 * length(x))
+expr_train_filt <- expr_train[keep_genes, dt_train$patient_id, drop = FALSE]
+
+cat(sprintf("Genes retained after filtering: %d out of %d\n", 
+    sum(keep_genes), length(keep_genes)))
+
+# DEG analysis: High RMST vs Low RMST
+grp_train <- dt_train$rmst_group
+stopifnot(length(grp_train) == ncol(expr_train_filt))
+
+design <- stats::model.matrix(~ grp_train) # Low vs High (Low is baseline)
+fit <- limma::lmFit(expr_train_filt, design)
+fit <- limma::eBayes(fit)
+fit$genes <- data.frame(gene = rownames(expr_train_filt))
+
+# limma results: Low_RMST vs High_RMST
+res_limma <- limma::topTable(
+  fit,
+  coef = "grp_trainLow_RMST",
+  number = Inf,
+  adjust.method = "BH"
+) %>%
+  as.data.frame()
+
+cat("\n=== DEG Summary Statistics ===\n")
+cat(sprintf("Total genes tested: %d\n", nrow(res_limma)))
+cat(sprintf("logFC range: [%.3f, %.3f]\n", 
+    min(res_limma$logFC), max(res_limma$logFC)))
+cat(sprintf("Median |logFC|: %.3f\n", median(abs(res_limma$logFC))))
+
+# Thresholds
+alpha_fdr <- 0.10  # FDR threshold
+lfc_cut   <- 0.2   # ~1.15-fold change
+top_n_sig <- 10    # top N significant genes to label
+top_n_nsig <- 10   # top N non-sig genes to label
+
+# Pull rownames as gene IDs if needed
+if (!"gene" %in% colnames(res_limma)) {
+  res_limma <- res_limma %>% tibble::rownames_to_column("gene")
+}
+
+# Annotate DEG class
+res_annot <- res_limma %>%
+  dplyr::mutate(
+    neglog10_adjP = -log10(adj.P.Val),
+    direction = dplyr::case_when(
+      logFC >=  lfc_cut ~ "Up",
+      logFC <= -lfc_cut ~ "Down",
+      TRUE              ~ "None"
+    ),
+    deg_class = dplyr::case_when(
+      adj.P.Val < alpha_fdr & logFC >=  lfc_cut ~ "Upregulated in Low RMST",
+      adj.P.Val < alpha_fdr & logFC <= -lfc_cut ~ "Downregulated in Low RMST",
+      TRUE                                      ~ "Not significant"
+    )
+  )
+
+# Select significant DEGs
+deg_limma_selected <- res_annot %>%
+  dplyr::filter(adj.P.Val < alpha_fdr, abs(logFC) >= lfc_cut) %>%
+  dplyr::arrange(adj.P.Val)
+
+cat(sprintf("Significant DEGs (FDR < %.2f, |logFC| >= %.2f): %d\n",
+    alpha_fdr, lfc_cut, nrow(deg_limma_selected)))
+
+if (nrow(deg_limma_selected) == 0) {
+  warning("No DEGs passed thresholds; using top 50 by adj p-value")
+  deg_limma_selected <- res_annot %>%
+    dplyr::arrange(adj.P.Val) %>%
+    dplyr::slice_head(n = 50)
+}
+
+deg_genes <- deg_limma_selected$gene
+deg_genes_up   <- deg_limma_selected %>% 
+  dplyr::filter(logFC >=  lfc_cut) %>% 
+  dplyr::pull(gene)
+deg_genes_down <- deg_limma_selected %>% 
+  dplyr::filter(logFC <= -lfc_cut) %>% 
+  dplyr::pull(gene)
+
+cat(sprintf("  Upregulated: %d | Downregulated: %d\n", 
+    length(deg_genes_up), length(deg_genes_down)))
+
+# Table of top DEGs
+deg_tbl_up <- deg_limma_selected %>%
+  dplyr::filter(deg_class == "Upregulated in Low RMST") %>%
+  dplyr::arrange(adj.P.Val, desc(logFC)) %>%
+  dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
+  dplyr::slice_head(n = 10)
+
+deg_tbl_down <- deg_limma_selected %>%
+  dplyr::filter(deg_class == "Downregulated in Low RMST") %>%
+  dplyr::arrange(adj.P.Val, logFC) %>%
+  dplyr::select(gene, logFC, AveExpr, t, P.Value, adj.P.Val) %>%
+  dplyr::slice_head(n = 10)
+
+deg_tbl <- dplyr::bind_rows(deg_tbl_up, deg_tbl_down)
+
+# Save DEG table
+write.csv(res_annot, "results/survival/tables/deg_analysis_binary_rmst.csv", 
+         row.names = FALSE)
+write.csv(deg_tbl, "results/survival/tables/deg_top_genes_binary_rmst.csv", 
+         row.names = FALSE)
+cat("✓ Saved DEG tables to results/survival/tables/\n")
+
+# Volcano plot
+cat("Generating volcano plot...\n")
+volcano_data <- res_annot
+volcano_data$deg_class <- factor(
+  volcano_data$deg_class,
+  levels = c("Upregulated in Low RMST", "Downregulated in Low RMST", "Not significant")
+)
+
+# Select genes to label
+label_data <- dplyr::bind_rows(
+  volcano_data %>%
+    dplyr::filter(deg_class %in% c("Upregulated in Low RMST", "Downregulated in Low RMST")) %>%
+    dplyr::arrange(desc(abs(logFC))) %>%
+    dplyr::group_by(deg_class) %>%
+    dplyr::slice_head(n = top_n_sig) %>%
+    dplyr::ungroup(),
+  volcano_data %>%
+    dplyr::filter(deg_class == "Not significant") %>%
+    dplyr::mutate(extremeness = neglog10_adjP * abs(logFC)) %>%
+    dplyr::arrange(desc(extremeness)) %>%
+    dplyr::slice_head(n = top_n_nsig)
+)
+
+volcano_plot <- ggplot(volcano_data, 
+                       aes(x = logFC, y = neglog10_adjP, color = deg_class)) +
+  geom_point(alpha = 0.5, size = 1) +
+  geom_vline(xintercept = c(-lfc_cut, lfc_cut), 
+            linetype = "dashed", linewidth = 0.3, color = "black") +
+  geom_hline(yintercept = -log10(alpha_fdr), 
+            linetype = "dashed", linewidth = 0.3, color = "black") +
+  ggrepel::geom_text_repel(
+    data = label_data,
+    aes(label = gene),
+    size = 2.5,
+    max.overlaps = 20,
+    box.padding = 0.25,
+    point.padding = 0.2,
+    segment.size = 0.2,
+    segment.alpha = 0.5,
+    min.segment.length = 0.1
+  ) +
+  scale_color_manual(
+    values = c(
+      "Upregulated in Low RMST"   = "#E41A1C",  # Red
+      "Downregulated in Low RMST" = "#377EB8",  # Blue
+      "Not significant"           = "black"
+    ),
+    labels = c(
+      "Upregulated in Low RMST"   = "Upregulated",
+      "Downregulated in Low RMST" = "Downregulated",
+      "Not significant"           = "Not significant"
+    ),
+    name = "DEG class"
+  ) +
+  labs(
+    title = "",
+    x = "log2 Fold Change (Low vs High RMST)",
+    y = "-log10(FDR)"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.3),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    legend.position = "right",
+    legend.title = element_text(face = "bold", size = 9),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    axis.title = element_text(size = 10, face = "bold"),
+    axis.text = element_text(size = 9, color = "black"),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_line(color = "black", linewidth = 0.3)
+  )
+
+ggsave("results/survival/figures/deg_volcano_plot_binary_rmst.png",
+       volcano_plot, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
+cat("✓ Saved volcano plot\n")
+
+# Boxplots of top DEG expression
+if (nrow(deg_tbl) > 0) {
+  cat("Generating expression boxplots for top DEGs...\n")
+  
+  top_genes <- unique(deg_tbl$gene)
+  top_genes <- top_genes[top_genes %in% rownames(expr_train_filt)]
+  
+  if (length(top_genes) > 0) {
+    # Limit to max 20 genes for visualization
+    top_genes <- head(top_genes, 20)
+    
+    exp_top <- expr_train_filt[top_genes, dt_train$patient_id, drop = FALSE]
+    exp_top_df <- as.data.frame(t(exp_top)) %>%
+      dplyr::mutate(patient_id = rownames(.)) %>%
+      dplyr::left_join(
+        dt_train %>% dplyr::select(patient_id, rmst_group),
+        by = "patient_id"
+      ) %>%
+      tidyr::pivot_longer(
+        cols = all_of(top_genes),
+        names_to = "gene",
+        values_to = "expression"
+      )
+    
+    boxplot_top_degs <- ggplot(exp_top_df, 
+                               aes(x = rmst_group, y = expression, fill = rmst_group)) +
+      geom_boxplot(alpha = 0.7, outlier.size = 0.5) +
+      facet_wrap(~ gene, scales = "free_y", ncol = 5) +
+      scale_fill_manual(
+        values = c("High_RMST" = "#7FC97F", "Low_RMST" = "#E78C73"),
+        labels = c("High_RMST" = "High RMST\n(Better Survival)", 
+                  "Low_RMST" = "Low RMST\n(Worse Survival)")
+      ) +
+      labs(
+        title = "Expression of Top DEGs by RMST Group",
+        subtitle = "Training set - genes ranked by FDR",
+        x = NULL,
+        y = "Expression (z-score)",
+        fill = "RMST Group"
+      ) +
+      theme_nature() +
+      theme(
+        plot.title = element_text(face = "bold", size = 13),
+        plot.subtitle = element_text(size = 10, color = "gray40"),
+        legend.position = "top",
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 8, face = "bold")
+      )
+    
+    ggsave("results/survival/figures/deg_top_genes_boxplot_binary_rmst.png",
+           boxplot_top_degs, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
+    cat("✓ Saved expression boxplot\n")
+  } else {
+    cat("⊗ Skipped boxplot: no top genes found in expression matrix\n")
+  }
+} else {
+  cat("⊗ Skipped boxplot: no significant DEGs to plot\n")
+}
+
+cat("\n=== DEG Analysis Complete ===\n\n")
 
 #################################################################################
 # GSVA-driven pathway ranking ----
@@ -2306,7 +2366,7 @@ forest_plot <- ggplot(forest_data, aes(x = theta, y = model, color = model, shap
   )
 
 ggsave("results/survival/figures/fig1_forest_plot_combined.png", forest_plot, 
-       width = 10, height = 5, dpi = 600, bg = "white")
+       width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
 cat("✓ Saved Figure 1 (Combined Test Set + Full Dataset)\n")
 
 # Figure 2: Stability across splits (including full dataset)
@@ -2363,7 +2423,7 @@ stability_plot <- ggplot(stability_data,
   )
 
 ggsave("results/survival/figures/fig2_stability_across_splits.png", stability_plot, 
-       width = 9, height = 6, dpi = 600, bg = "white")
+       width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
 cat("✓ Saved Figure 2 (with Full Dataset)\n")
 
 # Figure 3: Kaplan-Meier curves by pathway activity
@@ -2414,7 +2474,7 @@ if (has_survminer) {
   # Save
   ggsave("results/survival/figures/fig3a_km_curve_pathway.png", 
          print(km_plot_pathway), 
-         width = 10, height = 8, dpi = 600, bg = "white")
+         width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
   cat("✓ Saved Figure 3a\n")
   
   # Optional: KM curves by tumor stage
@@ -2457,7 +2517,7 @@ if (has_survminer) {
       
       ggsave("results/survival/figures/fig3b_km_curve_tumor_stage.png", 
              print(km_plot_stage), 
-             width = 10, height = 8, dpi = 600, bg = "white")
+             width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
       cat("✓ Saved Figure 3b\n")
     }
   }
@@ -2483,7 +2543,7 @@ scatter_rmst <- train_df %>%
   theme(plot.title = element_text(face = "bold", size = 14))
 
 ggsave("results/survival/figures/fig4_scatter_pathway_rmst.png", scatter_rmst, 
-       width = 8, height = 6, dpi = 600, bg = "white")
+       width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
 cat("✓ Saved Figure 4\n")
 
 # Figure 5: Sensitivity Analysis
@@ -2520,7 +2580,7 @@ sensitivity_plot <- ggplot(sensitivity_comparison,
   )
 
 ggsave("results/survival/figures/fig5_sensitivity_clinical_vs_full.png", sensitivity_plot, 
-       width = 7, height = 5, dpi = 600, bg = "white")
+       width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
 cat("✓ Saved Figure 5\n")
 
 # Supplementary Figure S1: Event Rate by Pathway Quartile
@@ -2564,13 +2624,13 @@ event_rate_plot <- ggplot(event_by_quartile,
   )
 
 ggsave("results/survival/figures/figS1_event_rate_by_quartile.png", event_rate_plot, 
-       width = 8, height = 6, dpi = 600, bg = "white")
+       width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
 cat("✓ Saved Supplementary Figure S1\n")
 
 # Supplementary Figure S2: GSVA Pathway Ranking
-cat("Generating Supplementary Figure S2: GSVA Ranking...\n")
+cat("Generating Supplementary Figure S2: GSVA Ranking (Top 5)...\n")
 gsva_plot_df <- gsva_rank_tbl %>%
-  dplyr::slice_head(n = 15) %>%
+  dplyr::slice_head(n = 5) %>%
   dplyr::mutate(
     ID = forcats::fct_reorder(ID, correlation),
     neg_log10_p = pmin(-log10(p_adjust), 10)  # Cap at 10 for visualization
@@ -2592,13 +2652,28 @@ gsva_rank_plot <- ggplot(gsva_plot_df,
   theme_nature() +
   theme(
     plot.title = element_text(face = "bold", size = 14),
-    legend.position = "right",
-    axis.text.y = element_text(size = 8)
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 11),
+    axis.title.x = element_text(size = 12, face = "bold")
+  ) +
+  guides(
+    color = guide_colorbar(title = "-log10(adj.p)", 
+                          title.position = "top",
+                          title.hjust = 0.5,
+                          barwidth = 8,
+                          barheight = 0.8),
+    size = guide_legend(title = "|Correlation|",
+                       title.position = "top", 
+                       title.hjust = 0.5,
+                       nrow = 1)
   )
 
 ggsave("results/survival/figures/figS2_gsva_pathway_ranking.png", gsva_rank_plot, 
-       width = 10, height = 7, dpi = 600, bg = "white")
-cat("✓ Saved Supplementary Figure S2\n")
+       width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
+cat("✓ Saved Supplementary Figure S2 (Top 5 Pathways)\n")
 
 # Supplementary Figure S2b: Pathway Score Distribution by RMST Group
 cat("Generating Supplementary Figure S2b: Pathway Distribution by RMST Group...\n")
@@ -2664,7 +2739,7 @@ pathway_density_plot <- ggplot(train_df_plot,
 
 ggsave("results/survival/figures/figS2b_pathway_distribution_by_rmst.png", 
        pathway_density_plot, 
-       width = 9, height = 6, dpi = 600, bg = "white")
+       width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
 cat("✓ Saved Supplementary Figure S2b (Pathway Distribution by RMST)\n")
 
 # Supplementary Figure S3: Model Performance Comparison
@@ -2714,7 +2789,7 @@ if (nrow(performance_plot_data) > 0) {
     )
   
   ggsave("results/survival/figures/figS3_model_performance_comparison.png", performance_comparison_plot,
-         width = 10, height = 5, dpi = 600, bg = "white")
+         width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
   cat("✓ Saved Supplementary Figure S3\n")
 } else {
   cat("⊗ Skipped Figure S3 (no performance data available)\n")
@@ -2769,7 +2844,7 @@ if (!is.na(performance_results$glmnet$rmst_cor) &&
       theme(plot.title = element_text(face = "bold", size = 14))
     
     ggsave("results/survival/figures/figS4_glmnet_rmst_prediction.png", rmst_pred_plot,
-           width = 7, height = 6, dpi = 600, bg = "white")
+           width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
     cat("✓ Saved Supplementary Figure S4\n")
     
   }, error = function(e) {
