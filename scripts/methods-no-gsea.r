@@ -89,6 +89,24 @@ next_fig_path <- function(filename, dir = ".") {
   file.path(dir, sprintf("[%s]%s", label, filename))
 }
 
+# Toggle to export plots as squares (width == height).
+square_plot_exports <- TRUE
+save_plot <- function(..., square = square_plot_exports) {
+  args <- list(...)
+  if (isTRUE(square)) {
+    if (!"width" %in% names(args)) {
+      args$width <- 6
+    }
+    if (!"height" %in% names(args)) {
+      args$height <- 6
+    }
+    side <- max(as.numeric(args$width), as.numeric(args$height), na.rm = TRUE)
+    args$width <- side
+    args$height <- side
+  }
+  do.call(ggplot2::ggsave, args)
+}
+
 stratified_split <- function(ids, strata, train_frac = 0.7, val_frac = 0.15, seed = 202501) {
   stopifnot(length(ids) == length(strata))
   set.seed(seed)
@@ -1239,7 +1257,7 @@ volcano_plot <- ggplot(volcano_data, aes(x = logFC, y = neglog10_adjP, color = a
 
 volcano_plot
 # save the 600 dpi image in results folder
-ggsave(
+save_plot(
   filename = next_fig_path("limma_deg_volcano_plot.png", dir = "results/5-fold-results"),
   plot = volcano_plot,
   width = 6,
@@ -1278,7 +1296,7 @@ boxplot_top_degs <- ggplot(exp_top_df, aes(x = tumor_stage, y = expression, fill
   theme_nature()
 boxplot_top_degs
 # save the 600 dpi image in results folder
-ggsave(boxplot_top_degs,
+save_plot(boxplot_top_degs,
        filename = next_fig_path("top_degs_boxplot.png", dir = "results/5-fold-results"),
        width = 8,
        height = 6,
@@ -1378,7 +1396,8 @@ gsva_plot_df <- gsva_rank_tbl %>%
 
 gsva_rank_plot <- ggplot(gsva_plot_df, aes(x = delta, y = ID, size = abs(delta), color = -log10(p_adjust))) +
   geom_point(alpha = 0.85) +
-  scale_color_gradient(low = "#97C4BC", high = "#1F78B4", name = "-log10 adj p") +
+  scale_color_gradient(low = "#97C4BC", high = "#1F78B4", name = "-log10(adj.p)") +
+  scale_size_continuous(range = c(3, 8), name = "Absolute delta") +
   labs(
     title = "Breast cancer relevant GSVA ranking",
     subtitle = "Top pathways by GSVA score contrast (late vs early)",
@@ -1386,11 +1405,85 @@ gsva_rank_plot <- ggplot(gsva_plot_df, aes(x = delta, y = ID, size = abs(delta),
     y = NULL,
     size = "Absolute delta"
   ) +
-  theme_nature()
+  theme_nature() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 11),
+    axis.title.x = element_text(size = 12, face = "bold")
+  ) +
+  guides(
+    color = guide_colorbar(
+      title = "-log10(adj.p)",
+      title.position = "top",
+      title.hjust = 0.5,
+      barwidth = 8,
+      barheight = 0.8
+    ),
+    size = guide_legend(
+      title = "Absolute delta",
+      title.position = "top",
+      title.hjust = 0.5,
+      nrow = 1
+    )
+  )
 gsva_rank_plot
-ggsave(
+save_plot(
   filename = next_fig_path("gsva_ranking_plot.png", dir = "results/5-fold-results"),
   plot = gsva_rank_plot,
+  width = 8,
+  height = 6,
+  dpi = 600
+)
+
+gsva_top5_df <- gsva_rank_tbl %>%
+  dplyr::slice_head(n = 5) %>%
+  dplyr::mutate(ID = stats::reorder(ID, delta))
+
+gsva_rank_plot_top5 <- ggplot(gsva_top5_df, aes(x = delta, y = ID, size = abs(delta), color = -log10(p_adjust))) +
+  geom_point(alpha = 0.85) +
+  scale_color_gradient(low = "#97C4BC", high = "#1F78B4", name = "-log10(adj.p)") +
+  scale_size_continuous(range = c(3, 8), name = "Absolute delta") +
+  labs(
+    title = "Breast cancer relevant GSVA ranking",
+    subtitle = "Top 5 pathways by GSVA score contrast (late vs early)",
+    x = "GSVA score delta (late - early)",
+    y = NULL,
+    size = "Absolute delta"
+  ) +
+  theme_nature() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 11),
+    axis.title.x = element_text(size = 12, face = "bold")
+  ) +
+  guides(
+    color = guide_colorbar(
+      title = "-log10(adj.p)",
+      title.position = "top",
+      title.hjust = 0.5,
+      barwidth = 8,
+      barheight = 0.8
+    ),
+    size = guide_legend(
+      title = "Absolute delta",
+      title.position = "top",
+      title.hjust = 0.5,
+      nrow = 1
+    )
+  )
+
+gsva_rank_plot_top5
+save_plot(
+  filename = next_fig_path("gsva_ranking_plot_top5.png", dir = "results/5-fold-results"),
+  plot = gsva_rank_plot_top5,
   width = 8,
   height = 6,
   dpi = 600
@@ -1502,7 +1595,7 @@ gsva_density_plot <- ggplot(train_pathway_df, aes(x = pathway_score, fill = tumo
   scale_fill_manual(values = c("early" = "#63A375", "late" = "#E4572E")) +
   theme_nature()
 gsva_density_plot
-ggsave(
+save_plot(
   filename = next_fig_path("gsva_distribution_by_stage_train.png", dir = "results/5-fold-results"),
   plot = gsva_density_plot,
   width = 7,
@@ -1938,7 +2031,7 @@ if (nrow(dml_split_tbl)) {
       legend.position = "bottom"
     )
   
-  ggsave(
+  save_plot(
     filename = next_fig_path("dr_effect_forest_plot.png", dir = plots_dir),
     plot = dr_forest_plot,
     width = 10,
@@ -1953,29 +2046,65 @@ if (nrow(dml_split_tbl)) {
 #-------------------------------------------------------------------------------
 
 if (nrow(dml_split_tbl)) {
-  stability_plot_data <- dml_split_tbl %>%
+  stability_plot_data <- dplyr::bind_rows(
+    dml_split_tbl %>% dplyr::mutate(dataset_type = "CV Split"),
+    dml_full_tbl %>% dplyr::mutate(dataset_type = "Full Data")
+  ) %>%
     dplyr::mutate(
-      split = factor(split, levels = c("train", "val", "test")),
+      split = dplyr::case_when(
+        split == "train" ~ "Train",
+        split == "val" ~ "Val",
+        split == "test" ~ "Test",
+        split == "all" ~ "Full",
+        TRUE ~ split
+      ),
+      split = factor(split, levels = c("Train", "Val", "Test", "Full")),
       model = factor(model, levels = c("DR-BART", "DR-GLMNET", "DR-RF"))
     )
 
-  stability_plot <- ggplot(stability_plot_data, aes(x = split, y = theta, group = model, color = model)) +
+  stability_cv <- stability_plot_data %>% dplyr::filter(dataset_type == "CV Split")
+  stability_full <- stability_plot_data %>% dplyr::filter(dataset_type == "Full Data")
+  dodge_split <- position_dodge(width = 0.25)
+
+  stability_plot <- ggplot(stability_plot_data, aes(x = split, y = theta, color = model, shape = dataset_type)) +
     geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.6) +
-    geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.12, linewidth = 0.9) +
-    geom_line(linewidth = 1.2) +
-    geom_point(size = 3.2) +
+    geom_errorbar(
+      data = stability_plot_data,
+      aes(ymin = ci_lower, ymax = ci_upper),
+      width = 0.12,
+      linewidth = 0.9,
+      position = dodge_split
+    ) +
+    geom_line(
+      data = stability_cv,
+      aes(group = model),
+      linewidth = 1.2,
+      position = dodge_split
+    ) +
+    geom_point(
+      data = stability_cv,
+      size = 3.2,
+      position = dodge_split
+    ) +
+    geom_point(
+      data = stability_full,
+      size = 3.6,
+      position = dodge_split
+    ) +
     scale_color_manual(values = c("DR-BART" = "#56B4E9", "DR-GLMNET" = "#E69F00", "DR-RF" = "#009E73")) +
+    scale_shape_manual(values = c("CV Split" = 16, "Full Data" = 17)) +
     labs(
       title = "Model Stability Across Data Splits",
       subtitle = "Consistent estimates indicate robust causal effect",
       x = "Data Split",
       y = expression(paste("Treatment Effect Estimate (", theta, ")")),
-      color = "DR Method"
+      color = "DR Method",
+      shape = "Dataset Type"
     ) +
     theme_nature(base_size = 12) +
     theme(legend.position = "bottom")
 
-  ggsave(
+  save_plot(
     filename = next_fig_path("stability_across_splits.png", dir = plots_dir),
     plot = stability_plot,
     width = 10,
@@ -2015,7 +2144,7 @@ if (nrow(model_metrics)) {
     theme_nature() +
     theme(legend.position = "top")
   
-  ggsave(
+  save_plot(
     filename = next_fig_path("model_performance_comparison.png", dir = plots_dir),
     plot = performance_bar_plot,
     width = 8,
@@ -2088,22 +2217,22 @@ roc_bart_default <- create_roc_curve_plot(bart_val_pred, val_df$tumor_stage_bina
                                           threshold_adj = 0.5, threshold_label = "Default 0.5")
 
 if (!is.null(roc_glmnet_youden)) {
-  ggsave(next_fig_path("roc_curve_glmnet_youden.png", dir = plots_dir), roc_glmnet_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_glmnet_youden.png", dir = plots_dir), roc_glmnet_youden, width = 7, height = 6, dpi = 600)
 }
 if (!is.null(roc_rf_youden)) {
-  ggsave(next_fig_path("roc_curve_rf_youden.png", dir = plots_dir), roc_rf_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_rf_youden.png", dir = plots_dir), roc_rf_youden, width = 7, height = 6, dpi = 600)
 }
 if (!is.null(roc_bart_youden)) {
-  ggsave(next_fig_path("roc_curve_bart_youden.png", dir = plots_dir), roc_bart_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_bart_youden.png", dir = plots_dir), roc_bart_youden, width = 7, height = 6, dpi = 600)
 }
 if (!is.null(roc_glmnet_default)) {
-  ggsave(next_fig_path("roc_curve_glmnet_default0p5.png", dir = plots_dir), roc_glmnet_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_glmnet_default0p5.png", dir = plots_dir), roc_glmnet_default, width = 7, height = 6, dpi = 600)
 }
 if (!is.null(roc_rf_default)) {
-  ggsave(next_fig_path("roc_curve_rf_default0p5.png", dir = plots_dir), roc_rf_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_rf_default0p5.png", dir = plots_dir), roc_rf_default, width = 7, height = 6, dpi = 600)
 }
 if (!is.null(roc_bart_default)) {
-  ggsave(next_fig_path("roc_curve_bart_default0p5.png", dir = plots_dir), roc_bart_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("roc_curve_bart_default0p5.png", dir = plots_dir), roc_bart_default, width = 7, height = 6, dpi = 600)
 }
 cat("Saved: ROC curves for all models (Youden and default)\n")
 
@@ -2132,22 +2261,22 @@ pr_bart_default <- create_pr_curve_plot(bart_val_pred, val_df$tumor_stage_binary
                                         threshold_adj = 0.5, threshold_label = "Default 0.5")
 
 if (!is.null(pr_glmnet_youden)) {
-  ggsave(next_fig_path("pr_curve_glmnet_youden.png", dir = plots_dir), pr_glmnet_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_glmnet_youden.png", dir = plots_dir), pr_glmnet_youden, width = 7, height = 6, dpi = 600)
 }
 if (!is.null(pr_rf_youden)) {
-  ggsave(next_fig_path("pr_curve_rf_youden.png", dir = plots_dir), pr_rf_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_rf_youden.png", dir = plots_dir), pr_rf_youden, width = 7, height = 6, dpi = 600)
 }
 if (!is.null(pr_bart_youden)) {
-  ggsave(next_fig_path("pr_curve_bart_youden.png", dir = plots_dir), pr_bart_youden, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_bart_youden.png", dir = plots_dir), pr_bart_youden, width = 7, height = 6, dpi = 600)
 }
 if (!is.null(pr_glmnet_default)) {
-  ggsave(next_fig_path("pr_curve_glmnet_default0p5.png", dir = plots_dir), pr_glmnet_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_glmnet_default0p5.png", dir = plots_dir), pr_glmnet_default, width = 7, height = 6, dpi = 600)
 }
 if (!is.null(pr_rf_default)) {
-  ggsave(next_fig_path("pr_curve_rf_default0p5.png", dir = plots_dir), pr_rf_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_rf_default0p5.png", dir = plots_dir), pr_rf_default, width = 7, height = 6, dpi = 600)
 }
 if (!is.null(pr_bart_default)) {
-  ggsave(next_fig_path("pr_curve_bart_default0p5.png", dir = plots_dir), pr_bart_default, width = 7, height = 6, dpi = 600)
+  save_plot(next_fig_path("pr_curve_bart_default0p5.png", dir = plots_dir), pr_bart_default, width = 7, height = 6, dpi = 600)
 }
 cat("Saved: PR curves for all models (Youden and default)\n")
 
@@ -2162,9 +2291,9 @@ cal_rf <- create_calibration_plot(rf_val_pred, val_df$tumor_stage_binary,
 cal_bart <- create_calibration_plot(bart_val_pred, val_df$tumor_stage_binary, 
                                      bart_test_pred, test_df$tumor_stage_binary, "DR-BART")
 
-ggsave(next_fig_path("calibration_glmnet.png", dir = plots_dir), cal_glmnet, width = 7, height = 6, dpi = 600)
-ggsave(next_fig_path("calibration_rf.png", dir = plots_dir), cal_rf, width = 7, height = 6, dpi = 600)
-ggsave(next_fig_path("calibration_bart.png", dir = plots_dir), cal_bart, width = 7, height = 6, dpi = 600)
+save_plot(next_fig_path("calibration_glmnet.png", dir = plots_dir), cal_glmnet, width = 7, height = 6, dpi = 600)
+save_plot(next_fig_path("calibration_rf.png", dir = plots_dir), cal_rf, width = 7, height = 6, dpi = 600)
+save_plot(next_fig_path("calibration_bart.png", dir = plots_dir), cal_bart, width = 7, height = 6, dpi = 600)
 cat("Saved: Calibration plots for all models\n")
 
 #-------------------------------------------------------------------------------
@@ -2185,12 +2314,12 @@ cm_rf_default <- create_confusion_matrix_plot(rf_test_pred, test_df$tumor_stage_
 cm_bart_default <- create_confusion_matrix_plot(bart_test_pred, test_df$tumor_stage_binary, 
                                                 0.5, "DR-BART", "Test", "Default 0.5")
 
-ggsave(next_fig_path("confusion_matrix_glmnet_youden.png", dir = plots_dir), cm_glmnet, width = 6, height = 5, dpi = 600)
-ggsave(next_fig_path("confusion_matrix_rf_youden.png", dir = plots_dir), cm_rf, width = 6, height = 5, dpi = 600)
-ggsave(next_fig_path("confusion_matrix_bart_youden.png", dir = plots_dir), cm_bart, width = 6, height = 5, dpi = 600)
-ggsave(next_fig_path("confusion_matrix_glmnet_default0p5.png", dir = plots_dir), cm_glmnet_default, width = 6, height = 5, dpi = 600)
-ggsave(next_fig_path("confusion_matrix_rf_default0p5.png", dir = plots_dir), cm_rf_default, width = 6, height = 5, dpi = 600)
-ggsave(next_fig_path("confusion_matrix_bart_default0p5.png", dir = plots_dir), cm_bart_default, width = 6, height = 5, dpi = 600)
+save_plot(next_fig_path("confusion_matrix_glmnet_youden.png", dir = plots_dir), cm_glmnet, width = 6, height = 5, dpi = 600)
+save_plot(next_fig_path("confusion_matrix_rf_youden.png", dir = plots_dir), cm_rf, width = 6, height = 5, dpi = 600)
+save_plot(next_fig_path("confusion_matrix_bart_youden.png", dir = plots_dir), cm_bart, width = 6, height = 5, dpi = 600)
+save_plot(next_fig_path("confusion_matrix_glmnet_default0p5.png", dir = plots_dir), cm_glmnet_default, width = 6, height = 5, dpi = 600)
+save_plot(next_fig_path("confusion_matrix_rf_default0p5.png", dir = plots_dir), cm_rf_default, width = 6, height = 5, dpi = 600)
+save_plot(next_fig_path("confusion_matrix_bart_default0p5.png", dir = plots_dir), cm_bart_default, width = 6, height = 5, dpi = 600)
 cat("Saved: Confusion matrices for all models (Youden and default)\n")
 
 #-------------------------------------------------------------------------------
@@ -2247,7 +2376,7 @@ pred_dist_plot <- ggplot(pred_dist_df, aes(x = pred, y = model, fill = truth_lab
 # Load ggridges if available
 if (requireNamespace("ggridges", quietly = TRUE)) {
   library(ggridges)
-  ggsave(next_fig_path("prediction_distribution_ridge.png", dir = plots_dir), pred_dist_plot, width = 9, height = 5, dpi = 600)
+  save_plot(next_fig_path("prediction_distribution_ridge.png", dir = plots_dir), pred_dist_plot, width = 9, height = 5, dpi = 600)
   cat("Saved: Prediction distribution ridge plot\n")
 }
 
@@ -2276,7 +2405,7 @@ sensitivity_forest_plot <- ggplot(sensitivity_comparison, aes(x = theta, y = mod
   theme_nature() +
   theme(legend.position = "bottom")
 
-ggsave(next_fig_path("sensitivity_analysis_forest.png", dir = plots_dir), sensitivity_forest_plot, width = 8, height = 5, dpi = 600)
+save_plot(next_fig_path("sensitivity_analysis_forest.png", dir = plots_dir), sensitivity_forest_plot, width = 8, height = 5, dpi = 600)
 cat("Saved: Sensitivity analysis forest plot\n")
 
 #-------------------------------------------------------------------------------
@@ -2302,7 +2431,7 @@ if (nrow(covariate_association)) {
     ) +
     coord_fixed(ratio = 0.8)
   
-  ggsave(next_fig_path("covariate_association_heatmap.png", dir = plots_dir), cov_assoc_plot, width = 12, height = 4, dpi = 600)
+  save_plot(next_fig_path("covariate_association_heatmap.png", dir = plots_dir), cov_assoc_plot, width = 12, height = 4, dpi = 600)
   cat("Saved: Covariate association heatmap\n")
 }
 
@@ -2329,7 +2458,7 @@ gsva_violin_plot <- ggplot(gsva_violin_df, aes(x = tumor_stage, y = pathway_scor
   theme_nature() +
   theme(legend.position = "none")
 
-ggsave(next_fig_path("gsva_violin_by_stage_split.png", dir = plots_dir), gsva_violin_plot, width = 10, height = 5, dpi = 600)
+save_plot(next_fig_path("gsva_violin_by_stage_split.png", dir = plots_dir), gsva_violin_plot, width = 10, height = 5, dpi = 600)
 cat("Saved: GSVA violin plot by stage and split\n")
 
 #-------------------------------------------------------------------------------
@@ -2364,7 +2493,7 @@ if (!is.null(roc_glmnet_obj) && !is.null(roc_rf_obj) && !is.null(roc_bart_obj)) 
     theme_nature() +
     theme(legend.position = "bottom")
   
-  ggsave(next_fig_path("combined_roc_curves.png", dir = plots_dir), combined_roc_plot, width = 8, height = 7, dpi = 600)
+  save_plot(next_fig_path("combined_roc_curves.png", dir = plots_dir), combined_roc_plot, width = 8, height = 7, dpi = 600)
   cat("Saved: Combined ROC curves\n")
 }
 
@@ -2382,7 +2511,7 @@ if (exists("dr_forest_plot") && exists("combined_roc_plot") && exists("gsva_viol
     label_size = 14
   )
   
-  ggsave(next_fig_path("summary_panel.png", dir = plots_dir), summary_panel, width = 10, height = 14, dpi = 600)
+  save_plot(next_fig_path("summary_panel.png", dir = plots_dir), summary_panel, width = 10, height = 14, dpi = 600)
   cat("Saved: Summary panel\n")
 }
 
