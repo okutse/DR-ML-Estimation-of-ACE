@@ -17,7 +17,7 @@ This repository contains code and data for the paper "Doubly-Robust Machine Lear
 ## Reproduction Steps
 
 To reproduce the findings in this study, follow these steps:
-1. **Data Preparation**: Download the necessary datasets from TCGA and place them in the `data/` directory. These data are available from the following link: https://portal.gdc.cancer.gov/
+1. **Data Preparation**: Download the necessary datasets from TCGA and place them in the `data/` directory. These data are available from the following link: https://www.cbioportal.org/
 2. **Install Dependencies**: Ensure you have R and Python installed along with the required libraries listed in `requirements.txt` and `environment.yml`.
 3. **Run Preprocessing Scripts**: Execute the scripts in the `scripts/` directory to preprocess the data.
 4. **Model Training and Evaluation**: Run the main analysis scripts to train the models and evaluate the causal effects.
