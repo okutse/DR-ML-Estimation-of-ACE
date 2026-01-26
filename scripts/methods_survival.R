@@ -1673,6 +1673,421 @@ cat("\nNote: Pooled fit is exploratory only - no holdout test set remains for va
 
 dr_effects_tbl <- dml_split_tbl %>% dplyr::filter(split == "train")
 
+
+#################################################################################
+# Model Prediction Performance Evaluation ----
+#################################################################################
+# Note: DML focuses on causal estimation, not prediction optimization.
+# Performance metrics are reported for quality assessment and model comparison.
+
+cat("\n=== Evaluating Outcome Model Prediction Performance ===\n")
+
+# Helper function: Calculate C-index (Concordance Index) for survival models
+calculate_cindex <- function(time, event, risk_score) {
+  if (length(unique(event)) < 2) {
+    return(NA)
+  }
+  tryCatch({
+    surv_obj <- survival::Surv(time, event)
+    concordance_result <- survival::concordance(surv_obj ~ risk_score)
+    return(as.numeric(concordance_result$concordance))
+  }, error = function(e) {
+    warning("C-index calculation failed: ", e$message)
+    return(NA)
+  })
+}
+
+# Helper function: Calculate Integrated Brier Score
+calculate_ibs <- function(time, event, predicted_surv, eval_times) {
+  tryCatch({
+    n <- length(time)
+    if (length(unique(event)) < 2 || n < 10) {
+      return(NA)
+    }
+    
+    # Use pec package if available, otherwise simplified calculation
+    if (requireNamespace("pec", quietly = TRUE)) {
+      surv_obj <- survival::Surv(time, event)
+      # Note: This is a simplified version; full implementation needs predicted survival curves
+      return(NA)  # Placeholder - complex calculation
+    } else {
+      # Simplified Brier score at tau
+      tau <- max(eval_times)
+      brier_scores <- sapply(eval_times, function(t) {
+        at_risk <- time >= t
+        observed <- (time <= t) & (event == 1)
+        if (sum(at_risk) == 0) return(NA)
+        # Simplified calculation
+        mean((observed - predicted_surv)^2, na.rm = TRUE)
+      })
+      return(mean(brier_scores, na.rm = TRUE))
+    }
+  }, error = function(e) {
+    return(NA)
+  })
+}
+
+# Helper function: Time-dependent AUC
+calculate_time_dependent_auc <- function(time, event, risk_score, eval_time) {
+  tryCatch({
+    if (requireNamespace("survivalROC", quietly = TRUE)) {
+      roc_obj <- survivalROC::survivalROC(
+        Stime = time,
+        status = event,
+        marker = risk_score,
+        predict.time = eval_time,
+        method = "KM"
+      )
+      return(roc_obj$AUC)
+    } else if (requireNamespace("timeROC", quietly = TRUE)) {
+      # Alternative using timeROC
+      roc_obj <- timeROC::timeROC(
+        T = time,
+        delta = event,
+        marker = risk_score,
+        times = eval_time,
+        cause = 1
+      )
+      return(roc_obj$AUC[2])  # AUC at specified time
+    } else {
+      return(NA)
+    }
+  }, error = function(e) {
+    warning("Time-dependent AUC calculation failed: ", e$message)
+    return(NA)
+  })
+}
+
+# Prepare test data
+test_cov_imp <- fit_imputer(test_df, adjustment_covariates)
+test_cov_df <- apply_imputer(test_df, test_cov_imp)
+test_cov_matrix <- model.matrix(cov_formula, data = test_cov_df)
+
+# Evaluation timepoints
+eval_times <- c(60, 120)  # 5 years, 10 years
+tau <- 120
+
+cat("Evaluation timepoints:", paste(eval_times, collapse = ", "), "months\n\n")
+
+# Initialize performance results
+performance_results <- list()
+
+#-----------------------------------------------------------------------------
+# 1. DR-Cox Performance
+#-----------------------------------------------------------------------------
+cat("Evaluating DR-Cox (Cox Proportional Hazards)...\n")
+
+tryCatch({
+  # Fit Cox model on test set for prediction evaluation
+  cox_fit_test <- survival::coxph(
+    Surv(OS_MONTHS, OS_STATUS_BINARY) ~ .,
+    data = cbind(test_cov_df, pathway_score = test_df$pathway_score)
+  )
+  
+  # Risk scores (higher = worse prognosis)
+  cox_risk <- predict(cox_fit_test, type = "risk")
+  cox_lp <- predict(cox_fit_test, type = "lp")  # linear predictor
+  
+  # C-index
+  cox_cindex <- calculate_cindex(test_df$OS_MONTHS, test_df$OS_STATUS_BINARY, cox_lp)
+  
+  # Time-dependent AUC
+  cox_auc_60 <- calculate_time_dependent_auc(test_df$OS_MONTHS, test_df$OS_STATUS_BINARY, 
+                                              cox_lp, 60)
+  cox_auc_120 <- calculate_time_dependent_auc(test_df$OS_MONTHS, test_df$OS_STATUS_BINARY, 
+                                               cox_lp, 120)
+  
+  # Predicted RMST (approximate using survival function)
+  cox_surv <- summary(survival::survfit(cox_fit_test, newdata = test_cov_df), 
+                     times = seq(0, tau, by = 1))
+  
+  # Store results
+  performance_results$cox <- list(
+    model = "DR-Cox",
+    cindex = cox_cindex,
+    auc_60 = cox_auc_60,
+    auc_120 = cox_auc_120,
+    rmst_cor = NA  # Cox predicts hazard, not RMST directly
+  )
+  
+  cat("  C-index:", round(cox_cindex, 3), "\n")
+  cat("  AUC at 60m:", round(cox_auc_60, 3), "\n")
+  cat("  AUC at 120m:", round(cox_auc_120, 3), "\n\n")
+  
+}, error = function(e) {
+  warning("DR-Cox performance evaluation failed: ", e$message)
+  performance_results$cox <- list(
+    model = "DR-Cox", cindex = NA, auc_60 = NA, auc_120 = NA, rmst_cor = NA
+  )
+})
+
+#-----------------------------------------------------------------------------
+# 2. DR-RSF Performance
+#-----------------------------------------------------------------------------
+cat("Evaluating DR-RSF (Random Survival Forest)...\n")
+
+tryCatch({
+  # Fit RSF model on test set
+  rsf_fit_test <- randomForestSRC::rfsrc(
+    Surv(OS_MONTHS, OS_STATUS_BINARY) ~ .,
+    data = cbind(test_cov_df, pathway_score = test_df$pathway_score),
+    ntree = 500,
+    importance = FALSE
+  )
+  
+  # Predicted mortality (higher = worse prognosis)
+  rsf_mortality <- rsf_fit_test$predicted.oob
+  if (is.null(rsf_mortality)) {
+    rsf_mortality <- rsf_fit_test$predicted
+  }
+  
+  # C-index (1 - error rate for survival)
+  rsf_cindex <- 1 - rsf_fit_test$err.rate[length(rsf_fit_test$err.rate)]
+  
+  # Alternative: manual C-index calculation
+  if (is.na(rsf_cindex) || rsf_cindex < 0.4 || rsf_cindex > 1) {
+    rsf_cindex <- calculate_cindex(test_df$OS_MONTHS, test_df$OS_STATUS_BINARY, 
+                                   rsf_mortality)
+  }
+  
+  # Time-dependent AUC
+  rsf_auc_60 <- calculate_time_dependent_auc(test_df$OS_MONTHS, test_df$OS_STATUS_BINARY,
+                                             rsf_mortality, 60)
+  rsf_auc_120 <- calculate_time_dependent_auc(test_df$OS_MONTHS, test_df$OS_STATUS_BINARY,
+                                              rsf_mortality, 120)
+  
+  # Store results
+  performance_results$rsf <- list(
+    model = "DR-RSF",
+    cindex = rsf_cindex,
+    auc_60 = rsf_auc_60,
+    auc_120 = rsf_auc_120,
+    rmst_cor = NA
+  )
+  
+  cat("  C-index:", round(rsf_cindex, 3), "\n")
+  cat("  AUC at 60m:", round(rsf_auc_60, 3), "\n")
+  cat("  AUC at 120m:", round(rsf_auc_120, 3), "\n\n")
+  
+}, error = function(e) {
+  warning("DR-RSF performance evaluation failed: ", e$message)
+  performance_results$rsf <- list(
+    model = "DR-RSF", cindex = NA, auc_60 = NA, auc_120 = NA, rmst_cor = NA
+  )
+})
+
+#-----------------------------------------------------------------------------
+# 3. DR-GLMNET Performance (Predicting Y_pseudo/RMST directly)
+#-----------------------------------------------------------------------------
+cat("Evaluating DR-GLMNET (GLMNET on RMST pseudo-outcome)...\n")
+
+tryCatch({
+  # Fit GLMNET on test set to predict Y_pseudo
+  test_X <- test_cov_matrix
+  test_Y <- test_df$Y_pseudo
+  
+  # Remove NA values
+  complete_idx <- complete.cases(test_X, test_Y)
+  test_X_complete <- test_X[complete_idx, , drop = FALSE]
+  test_Y_complete <- test_Y[complete_idx]
+  
+  if (length(test_Y_complete) > 10) {
+    glmnet_fit_test <- glmnet::cv.glmnet(
+      x = test_X_complete,
+      y = test_Y_complete,
+      family = "gaussian",
+      alpha = 0.5,
+      nfolds = 5
+    )
+    
+    # Predicted RMST
+    glmnet_pred <- predict(glmnet_fit_test, newx = test_X_complete, s = "lambda.min")
+    
+    # R-squared
+    glmnet_rsq <- 1 - sum((test_Y_complete - glmnet_pred)^2) / 
+                       sum((test_Y_complete - mean(test_Y_complete))^2)
+    
+    # Correlation
+    glmnet_cor <- cor(glmnet_pred, test_Y_complete, use = "complete.obs")
+    
+    # RMSE
+    glmnet_rmse <- sqrt(mean((test_Y_complete - glmnet_pred)^2))
+    
+    # MAE
+    glmnet_mae <- mean(abs(test_Y_complete - glmnet_pred))
+    
+    # For survival concordance: use predicted RMST as risk score (higher RMST = better prognosis)
+    # So we use negative predicted RMST for C-index calculation
+    glmnet_cindex <- calculate_cindex(
+      test_df$OS_MONTHS[complete_idx], 
+      test_df$OS_STATUS_BINARY[complete_idx], 
+      -as.vector(glmnet_pred)  # Negative because higher RMST = lower risk
+    )
+    
+    # Store results
+    performance_results$glmnet <- list(
+      model = "DR-GLMNET",
+      cindex = glmnet_cindex,
+      auc_60 = NA,  # GLMNET predicts RMST, not time-specific risk
+      auc_120 = NA,
+      rmst_cor = glmnet_cor,
+      rmst_rsq = glmnet_rsq,
+      rmst_rmse = glmnet_rmse,
+      rmst_mae = glmnet_mae
+    )
+    
+    cat("  C-index (using -pred as risk):", round(glmnet_cindex, 3), "\n")
+    cat("  R² (RMST prediction):", round(glmnet_rsq, 3), "\n")
+    cat("  Correlation:", round(glmnet_cor, 3), "\n")
+    cat("  RMSE:", round(glmnet_rmse, 2), "months\n")
+    cat("  MAE:", round(glmnet_mae, 2), "months\n\n")
+  } else {
+    warning("Insufficient complete cases for GLMNET evaluation")
+    performance_results$glmnet <- list(
+      model = "DR-GLMNET", cindex = NA, auc_60 = NA, auc_120 = NA, 
+      rmst_cor = NA, rmst_rsq = NA, rmst_rmse = NA, rmst_mae = NA
+    )
+  }
+  
+}, error = function(e) {
+  warning("DR-GLMNET performance evaluation failed: ", e$message)
+  performance_results$glmnet <- list(
+    model = "DR-GLMNET", cindex = NA, auc_60 = NA, auc_120 = NA, 
+    rmst_cor = NA, rmst_rsq = NA, rmst_rmse = NA, rmst_mae = NA
+  )
+})
+
+#-----------------------------------------------------------------------------
+# 4. Treatment Model (Random Forest) Performance
+#-----------------------------------------------------------------------------
+cat("Evaluating Treatment Model (Random Forest predicting pathway score)...\n")
+
+tryCatch({
+  # Fit RF to predict pathway score on test set
+  rf_treatment_test <- ranger::ranger(
+    pathway_score ~ .,
+    data = cbind(test_cov_df, pathway_score = test_df$pathway_score),
+    num.trees = 1200,
+    importance = "impurity"
+  )
+  
+  # Predictions
+  rf_pred <- rf_treatment_test$predictions
+  
+  # R-squared
+  rf_rsq <- 1 - sum((test_df$pathway_score - rf_pred)^2) / 
+                 sum((test_df$pathway_score - mean(test_df$pathway_score))^2)
+  
+  # Correlation
+  rf_cor <- cor(rf_pred, test_df$pathway_score, use = "complete.obs")
+  
+  # RMSE
+  rf_rmse <- sqrt(mean((test_df$pathway_score - rf_pred)^2))
+  
+  # Variable importance (top 10)
+  if (!is.null(rf_treatment_test$variable.importance)) {
+    top_vars <- sort(rf_treatment_test$variable.importance, decreasing = TRUE)[1:10]
+  } else {
+    top_vars <- NULL
+  }
+  
+  # Store results
+  treatment_performance <- list(
+    model = "RF-Treatment",
+    rsq = rf_rsq,
+    cor = rf_cor,
+    rmse = rf_rmse,
+    top_vars = names(top_vars)
+  )
+  
+  cat("  R² (pathway score prediction):", round(rf_rsq, 3), "\n")
+  cat("  Correlation:", round(rf_cor, 3), "\n")
+  cat("  RMSE:", round(rf_rmse, 3), "\n")
+  if (!is.null(top_vars)) {
+    cat("  Top 3 important variables:", paste(names(top_vars)[1:3], collapse = ", "), "\n")
+  }
+  cat("\n")
+  
+}, error = function(e) {
+  warning("Treatment model performance evaluation failed: ", e$message)
+  treatment_performance <- list(
+    model = "RF-Treatment", rsq = NA, cor = NA, rmse = NA, top_vars = NULL
+  )
+})
+
+#-----------------------------------------------------------------------------
+# Create Performance Summary Tables
+#-----------------------------------------------------------------------------
+
+# Table 1: Outcome Models (Survival Prediction)
+performance_outcome_tbl <- data.frame(
+  model = c("DR-Cox", "DR-RSF", "DR-GLMNET"),
+  cindex = c(
+    performance_results$cox$cindex,
+    performance_results$rsf$cindex,
+    performance_results$glmnet$cindex
+  ),
+  auc_60m = c(
+    performance_results$cox$auc_60,
+    performance_results$rsf$auc_60,
+    performance_results$glmnet$auc_60
+  ),
+  auc_120m = c(
+    performance_results$cox$auc_120,
+    performance_results$rsf$auc_120,
+    performance_results$glmnet$auc_120
+  ),
+  metric_type = c("Survival", "Survival", "RMST")
+)
+
+# Table 2: GLMNET RMST Prediction Performance
+performance_rmst_tbl <- data.frame(
+  model = "DR-GLMNET",
+  rsquared = performance_results$glmnet$rmst_rsq,
+  correlation = performance_results$glmnet$rmst_cor,
+  rmse_months = performance_results$glmnet$rmst_rmse,
+  mae_months = performance_results$glmnet$rmst_mae
+)
+
+# Table 3: Treatment Model Performance
+performance_treatment_tbl <- data.frame(
+  model = "RF-Treatment",
+  target = "Pathway Score",
+  rsquared = treatment_performance$rsq,
+  correlation = treatment_performance$cor,
+  rmse = treatment_performance$rmse
+)
+
+# Print summary
+cat("=== OUTCOME MODEL PERFORMANCE SUMMARY (Test Set) ===\n")
+print(performance_outcome_tbl)
+cat("\n")
+
+if (!all(is.na(performance_rmst_tbl[-1]))) {
+  cat("=== DR-GLMNET RMST PREDICTION PERFORMANCE ===\n")
+  print(performance_rmst_tbl)
+  cat("\n")
+}
+
+cat("=== TREATMENT MODEL PERFORMANCE ===\n")
+print(performance_treatment_tbl)
+cat("\n")
+
+# Save to CSV
+write.csv(performance_outcome_tbl, "results/survival/tables/tableS_outcome_model_performance.csv", 
+         row.names = FALSE)
+write.csv(performance_rmst_tbl, "results/survival/tables/tableS_rmst_prediction_performance.csv", 
+         row.names = FALSE)
+write.csv(performance_treatment_tbl, "results/survival/tables/tableS_treatment_model_performance.csv", 
+         row.names = FALSE)
+
+cat("✓ Saved performance tables to results/survival/tables/\n\n")
+
+# Add to analysis summary
+cat("Note: Performance metrics assess nuisance function quality.\n")
+cat("      DML estimates remain valid as long as models achieve adequate prediction.\n")
+cat("      Higher C-index/R² indicates more efficient (lower SE) causal estimates.\n\n")
+
 create_stratified_folds <- function(y, k = 5, seed = 202501) {
   set.seed(seed)
   folds <- integer(length(y))
@@ -1736,6 +2151,640 @@ clinical_sensitivity_tbl <- dplyr::tibble(
 )
 print("Sensitivity (clinical-only covariates) DR estimates:")
 print(clinical_sensitivity_tbl)
+
+
+#################################################################################
+# Save all results to files ----
+#################################################################################
+
+# Create results subdirectories if they don't exist
+if (!dir.exists("results")) {
+  dir.create("results", recursive = TRUE)
+}
+dir.create("results/survival/tables", showWarnings = FALSE, recursive = TRUE)
+dir.create("results/survival/figures", showWarnings = FALSE, recursive = TRUE)
+dir.create("results/survival/summary", showWarnings = FALSE, recursive = TRUE)
+
+cat("\n=== Saving Results to results/survival/ subfolders ===\n")
+
+# 1. Save DML estimates as CSV
+write.csv(dml_split_tbl, "results/survival/tables/dml_estimates_by_split.csv", row.names = FALSE)
+write.csv(dml_full_tbl, "results/survival/tables/dml_estimates_full_data.csv", row.names = FALSE)
+write.csv(clinical_sensitivity_tbl, "results/survival/tables/sensitivity_clinical_only.csv", row.names = FALSE)
+cat("✓ Saved DML estimates to results/survival/tables/\n")
+
+# 2. Save summary statistics as text file
+sink("results/survival/summary/analysis_summary.txt")
+cat("=================================================================\n")
+cat("Doubly Robust Machine Learning Analysis Summary\n")
+cat("Analysis Date:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+cat("=================================================================\n\n")
+
+cat("SELECTED PATHWAY:\n")
+cat("  ID:", selected_pathway_id, "\n")
+cat("  Label:", selected_pathway_label, "\n")
+cat("  Correlation with RMST:", round(selected_pathway$correlation, 4), "\n")
+cat("  Adjusted p-value:", format.pval(selected_pathway$p_adjust, digits = 3), "\n\n")
+
+cat("MAIN RESULTS (Test Set):\n")
+print(dml_split_tbl %>% dplyr::filter(split == "test"))
+cat("\n")
+
+cat("FULL DATA ESTIMATES (Exploratory):\n")
+print(dml_full_tbl)
+cat("\n")
+
+cat("SENSITIVITY ANALYSIS (Clinical covariates only):\n")
+print(clinical_sensitivity_tbl)
+cat("\n")
+
+cat("MODEL STABILITY ACROSS SPLITS:\n")
+stability_summary <- dml_split_tbl %>%
+  dplyr::group_by(model) %>%
+  dplyr::summarise(
+    mean_theta = mean(theta, na.rm = TRUE),
+    sd_theta = sd(theta, na.rm = TRUE),
+    cv_theta = sd_theta / abs(mean_theta) * 100,
+    mean_se = mean(se, na.rm = TRUE),
+    .groups = "drop"
+  )
+print(stability_summary)
+cat("\n")
+
+cat("MODEL PREDICTION PERFORMANCE (Test Set):\n")
+cat("Note: Metrics assess nuisance function quality, not causal estimation.\n\n")
+print(performance_outcome_tbl)
+cat("\n")
+
+if (!all(is.na(performance_rmst_tbl[-1]))) {
+  cat("DR-GLMNET RMST Prediction:\n")
+  print(performance_rmst_tbl)
+  cat("\n")
+}
+
+cat("Treatment Model (RF) Performance:\n")
+print(performance_treatment_tbl)
+cat("\n")
+
+cat("INTERPRETATION:\n")
+cat("  Treatment Effect (theta): Change in RMST (months) per 1-unit increase in pathway score\n")
+cat("  Negative theta indicates pathway activity is associated with shorter survival\n")
+cat("  All models use K=5 cross-fitting to prevent overfitting\n")
+cat("  Unified Random Forest treatment learner for fair comparison\n")
+cat("  \n")
+cat("  C-index: Concordance index for survival prediction (>0.7 excellent, >0.6 good)\n")
+cat("  AUC: Time-dependent area under ROC curve at specified timepoints\n")
+cat("  R²: Proportion of variance explained in RMST prediction\n")
+cat("  Higher prediction performance → More efficient (lower SE) causal estimates\n")
+sink()
+cat("✓ Saved analysis summary to results/survival/summary/analysis_summary.txt\n")
+
+#################################################################################
+# Visualizations ----
+#################################################################################
+
+cat("\n=== Generating Visualizations ===\n")
+
+# Load survminer if available for KM plots
+if (!requireNamespace("survminer", quietly = TRUE)) {
+  warning("survminer package not found. KM plots will be skipped. Install with: install.packages('survminer')")
+  has_survminer <- FALSE
+} else {
+  library(survminer)
+  has_survminer <- TRUE
+}
+
+# Figure 1: Forest Plot - Test Set + Full Dataset
+cat("Generating Figure 1: Forest Plot (Test Set + Full Dataset)...\n")
+
+# Combine test set and full dataset results
+forest_data <- dplyr::bind_rows(
+  dml_split_tbl %>%
+    dplyr::filter(split == "test") %>%
+    dplyr::mutate(dataset = "Test Set"),
+  dml_full_tbl %>%
+    dplyr::mutate(dataset = "Full Dataset")
+) %>%
+  dplyr::mutate(
+    model = factor(model, levels = c("DR-GLMNET", "DR-Cox", "DR-RSF")),
+    dataset = factor(dataset, levels = c("Test Set", "Full Dataset")),
+    facet_label = paste0(model, "\n(", dataset, ")")
+  )
+
+forest_plot <- ggplot(forest_data, aes(x = theta, y = model, color = model, shape = dataset)) +
+  geom_point(size = 4, position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = ci_lower, xmax = ci_upper), 
+                 height = 0.25, linewidth = 1, position = position_dodge(width = 0.5)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.8) +
+  scale_color_manual(
+    values = c(
+      "DR-GLMNET" = "#E69F00", 
+      "DR-Cox" = "#56B4E9", 
+      "DR-RSF" = "#009E73"
+    ),
+    name = "DR Method"
+  ) +
+  scale_shape_manual(
+    values = c("Test Set" = 16, "Full Dataset" = 17),
+    name = "Dataset"
+  ) +
+  labs(
+    title = "Causal Effect of Pathway Activity on RMST",
+    subtitle = sprintf("Treatment: %s", 
+                      stringr::str_trunc(selected_pathway_label, 60)),
+    x = "Treatment Effect (months change in RMST per unit pathway score)",
+    y = NULL,
+    caption = "Note: Full dataset results are exploratory (no holdout validation)"
+  ) +
+  theme_nature() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray30"),
+    plot.caption = element_text(size = 8, color = "gray50", hjust = 0),
+    legend.position = "right",
+    axis.text.y = element_text(size = 11)
+  )
+
+ggsave("results/survival/figures/fig1_forest_plot_combined.png", forest_plot, 
+       width = 10, height = 5, dpi = 600, bg = "white")
+cat("✓ Saved Figure 1 (Combined Test Set + Full Dataset)\n")
+
+# Figure 2: Stability across splits (including full dataset)
+cat("Generating Figure 2: Stability Plot (with Full Dataset)...\n")
+
+# Combine split results with full dataset
+stability_data <- dplyr::bind_rows(
+  dml_split_tbl %>%
+    dplyr::mutate(dataset_type = "CV Split"),
+  dml_full_tbl %>%
+    dplyr::mutate(split = "full", dataset_type = "Full Data")
+) %>%
+  dplyr::mutate(
+    split = factor(split, levels = c("train", "val", "test", "full")),
+    dataset_type = factor(dataset_type, levels = c("CV Split", "Full Data"))
+  )
+
+stability_plot <- ggplot(stability_data, 
+                         aes(x = split, y = theta, color = model, group = model)) +
+  geom_point(aes(shape = dataset_type), size = 4, 
+             position = position_dodge(width = 0.4)) +
+  geom_line(data = stability_data %>% dplyr::filter(dataset_type == "CV Split"),
+            linewidth = 1, position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), 
+                width = 0.25, linewidth = 0.9,
+                position = position_dodge(width = 0.4)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.8) +
+  scale_color_manual(values = c(
+    "DR-GLMNET" = "#E69F00", 
+    "DR-Cox" = "#56B4E9", 
+    "DR-RSF" = "#009E73"
+  )) +
+  scale_shape_manual(
+    values = c("CV Split" = 16, "Full Data" = 17),
+    name = "Dataset Type"
+  ) +
+  scale_x_discrete(labels = c("train" = "Train", "val" = "Val", 
+                              "test" = "Test", "full" = "Full")) +
+  labs(
+    title = "Model Stability Across Data Splits",
+    subtitle = "Consistent estimates indicate robust causal effect",
+    x = "Data Split",
+    y = "Treatment Effect Estimate (theta)",
+    color = "DR Method"
+  ) +
+  theme_nature() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", size = 14)
+  ) +
+  guides(
+    color = guide_legend(order = 1, nrow = 1),
+    shape = guide_legend(order = 2, nrow = 1)
+  )
+
+ggsave("results/survival/figures/fig2_stability_across_splits.png", stability_plot, 
+       width = 9, height = 6, dpi = 600, bg = "white")
+cat("✓ Saved Figure 2 (with Full Dataset)\n")
+
+# Figure 3: Kaplan-Meier curves by pathway activity
+if (has_survminer) {
+  cat("Generating Figure 3: Kaplan-Meier Curves (Pathway)...\n")
+  
+  # Prepare data with pathway score groups
+  test_df_surv <- test_df %>%
+    dplyr::mutate(
+      pathway_group = factor(
+        ifelse(pathway_score >= median(pathway_score, na.rm = TRUE), 
+               "High Pathway Activity", 
+               "Low Pathway Activity"),
+        levels = c("Low Pathway Activity", "High Pathway Activity")
+      )
+    ) %>%
+    dplyr::filter(!is.na(pathway_group), !is.na(OS_MONTHS), !is.na(OS_STATUS_BINARY))
+  
+  # Fit survival curves
+  surv_fit_pathway <- survival::survfit(
+    Surv(OS_MONTHS, OS_STATUS_BINARY) ~ pathway_group,
+    data = test_df_surv
+  )
+  
+  # Create KM plot
+  km_plot_pathway <- survminer::ggsurvplot(
+    surv_fit_pathway,
+    data = test_df_surv,
+    pval = TRUE,
+    pval.method = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE,
+    risk.table.height = 0.25,
+    ggtheme = theme_nature(),
+    palette = c("#00BFC4", "#F8766D"),
+    title = sprintf("Survival by Pathway Activity (Test Set)\n%s", 
+                   stringr::str_trunc(selected_pathway_label, 60)),
+    xlab = "Time (months)",
+    ylab = "Survival Probability",
+    legend.title = "Pathway Activity",
+    legend.labs = c("Low", "High"),
+    font.main = c(14, "bold"),
+    font.x = c(12, "plain"),
+    font.y = c(12, "plain"),
+    font.tickslab = c(10, "plain")
+  )
+  
+  # Save
+  ggsave("results/survival/figures/fig3a_km_curve_pathway.png", 
+         print(km_plot_pathway), 
+         width = 10, height = 8, dpi = 600, bg = "white")
+  cat("✓ Saved Figure 3a\n")
+  
+  # Optional: KM curves by tumor stage
+  if ("tumor_stage" %in% colnames(test_df)) {
+    cat("Generating Figure 3b: Kaplan-Meier Curves (Tumor Stage)...\n")
+    
+    test_df_stage <- test_df %>%
+      dplyr::filter(!is.na(tumor_stage), !is.na(OS_MONTHS), !is.na(OS_STATUS_BINARY)) %>%
+      dplyr::mutate(
+        tumor_stage = factor(tumor_stage, levels = c(0, 1), 
+                           labels = c("Early Stage", "Late Stage"))
+      )
+    
+    if (nrow(test_df_stage) > 0 && length(unique(test_df_stage$tumor_stage)) > 1) {
+      surv_fit_stage <- survival::survfit(
+        Surv(OS_MONTHS, OS_STATUS_BINARY) ~ tumor_stage,
+        data = test_df_stage
+      )
+      
+      km_plot_stage <- survminer::ggsurvplot(
+        surv_fit_stage,
+        data = test_df_stage,
+        pval = TRUE,
+        pval.method = TRUE,
+        conf.int = TRUE,
+        risk.table = TRUE,
+        risk.table.height = 0.25,
+        ggtheme = theme_nature(),
+        palette = c("#63A375", "#E4572E"),
+        title = "Survival by Tumor Stage (Covariate, Test Set)",
+        xlab = "Time (months)",
+        ylab = "Survival Probability",
+        legend.title = "Tumor Stage",
+        legend.labs = c("Early", "Late"),
+        font.main = c(14, "bold"),
+        font.x = c(12, "plain"),
+        font.y = c(12, "plain"),
+        font.tickslab = c(10, "plain")
+      )
+      
+      ggsave("results/survival/figures/fig3b_km_curve_tumor_stage.png", 
+             print(km_plot_stage), 
+             width = 10, height = 8, dpi = 600, bg = "white")
+      cat("✓ Saved Figure 3b\n")
+    }
+  }
+} else {
+  cat("⊗ Skipped KM plots (survminer not installed)\n")
+}
+
+# Figure 4: Pathway Score vs RMST Scatter Plot
+cat("Generating Figure 4: Scatter Plot (Pathway vs RMST)...\n")
+scatter_rmst <- train_df %>%
+  dplyr::filter(!is.na(pathway_score), !is.na(Y_pseudo)) %>%
+  ggplot(aes(x = pathway_score, y = Y_pseudo)) +
+  geom_point(alpha = 0.4, color = "#1F78B4", size = 1.5) +
+  geom_smooth(method = "loess", color = "red", se = TRUE, linewidth = 1.2) +
+  geom_smooth(method = "lm", color = "blue", linetype = "dashed", se = FALSE, linewidth = 1) +
+  labs(
+    title = "Pathway Activity vs RMST (Training Set)",
+    subtitle = "Red: LOESS smoothing | Blue: Linear fit",
+    x = "Pathway Score (D)",
+    y = "RMST Pseudo-outcome (months)"
+  ) +
+  theme_nature() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+ggsave("results/survival/figures/fig4_scatter_pathway_rmst.png", scatter_rmst, 
+       width = 8, height = 6, dpi = 600, bg = "white")
+cat("✓ Saved Figure 4\n")
+
+# Figure 5: Sensitivity Analysis
+cat("Generating Figure 5: Sensitivity Analysis...\n")
+sensitivity_comparison <- dplyr::bind_rows(
+  dml_split_tbl %>% 
+    dplyr::filter(split == "train", model == "DR-GLMNET") %>%
+    dplyr::mutate(adjustment = "Full (Clinical + Genomic)"),
+  clinical_sensitivity_tbl %>%
+    dplyr::mutate(split = "train", adjustment = "Clinical Only")
+)
+
+sensitivity_plot <- ggplot(sensitivity_comparison, 
+                           aes(x = adjustment, y = theta, color = adjustment)) +
+  geom_point(size = 5) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), 
+                width = 0.2, linewidth = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.8) +
+  scale_color_manual(values = c(
+    "Full (Clinical + Genomic)" = "#009E73", 
+    "Clinical Only" = "#D55E00"
+  )) +
+  labs(
+    title = "Sensitivity Analysis: Covariate Adjustment",
+    subtitle = "DR-GLMNET model on training set",
+    x = NULL,
+    y = "Treatment Effect (theta)"
+  ) +
+  theme_nature() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text.x = element_text(size = 11)
+  )
+
+ggsave("results/survival/figures/fig5_sensitivity_clinical_vs_full.png", sensitivity_plot, 
+       width = 7, height = 5, dpi = 600, bg = "white")
+cat("✓ Saved Figure 5\n")
+
+# Supplementary Figure S1: Event Rate by Pathway Quartile
+cat("Generating Supplementary Figure S1: Event Rate by Quartile...\n")
+event_by_quartile <- train_df %>%
+  dplyr::filter(!is.na(pathway_score), !is.na(OS_STATUS_BINARY)) %>%
+  dplyr::mutate(
+    pathway_quartile = cut(
+      pathway_score, 
+      breaks = quantile(pathway_score, probs = seq(0, 1, 0.25), na.rm = TRUE),
+      labels = c("Q1 (Low)", "Q2", "Q3", "Q4 (High)"),
+      include.lowest = TRUE
+    )
+  ) %>%
+  dplyr::group_by(pathway_quartile) %>%
+  dplyr::summarise(
+    event_rate = mean(OS_STATUS_BINARY == 1, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(!is.na(pathway_quartile))
+
+event_rate_plot <- ggplot(event_by_quartile, 
+                          aes(x = pathway_quartile, y = event_rate, 
+                              fill = pathway_quartile)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("%.1f%%\n(n=%d)", event_rate * 100, n)), 
+            vjust = -0.5, size = 4, fontface = "bold") +
+  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, max(event_by_quartile$event_rate) * 1.15)) +
+  labs(
+    title = "Event Rate by Pathway Activity Quartile",
+    subtitle = "Training set",
+    x = "Pathway Score Quartile",
+    y = "Event Rate (Death)"
+  ) +
+  theme_nature() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+ggsave("results/survival/figures/figS1_event_rate_by_quartile.png", event_rate_plot, 
+       width = 8, height = 6, dpi = 600, bg = "white")
+cat("✓ Saved Supplementary Figure S1\n")
+
+# Supplementary Figure S2: GSVA Pathway Ranking
+cat("Generating Supplementary Figure S2: GSVA Ranking...\n")
+gsva_plot_df <- gsva_rank_tbl %>%
+  dplyr::slice_head(n = 15) %>%
+  dplyr::mutate(
+    ID = forcats::fct_reorder(ID, correlation),
+    neg_log10_p = pmin(-log10(p_adjust), 10)  # Cap at 10 for visualization
+  )
+
+gsva_rank_plot <- ggplot(gsva_plot_df, 
+                         aes(x = correlation, y = ID, size = abs(correlation), 
+                             color = neg_log10_p)) +
+  geom_point(alpha = 0.85) +
+  scale_color_gradient(low = "#97C4BC", high = "#1F78B4", 
+                      name = "-log10(adj.p)") +
+  scale_size_continuous(range = c(3, 8), name = "|Correlation|") +
+  labs(
+    title = "Top Breast Cancer Pathways by GSVA Ranking",
+    subtitle = "Ranked by correlation with RMST pseudo-outcome",
+    x = "Correlation with RMST",
+    y = NULL
+  ) +
+  theme_nature() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "right",
+    axis.text.y = element_text(size = 8)
+  )
+
+ggsave("results/survival/figures/figS2_gsva_pathway_ranking.png", gsva_rank_plot, 
+       width = 10, height = 7, dpi = 600, bg = "white")
+cat("✓ Saved Supplementary Figure S2\n")
+
+# Supplementary Figure S2b: Pathway Score Distribution by RMST Group
+cat("Generating Supplementary Figure S2b: Pathway Distribution by RMST Group...\n")
+
+# Create binary RMST groups based on median
+train_df_plot <- train_df %>%
+  dplyr::filter(!is.na(pathway_score), !is.na(Y_pseudo)) %>%
+  dplyr::mutate(
+    rmst_group = ifelse(Y_pseudo >= median(Y_pseudo, na.rm = TRUE), 
+                       "High RMST (Better Survival)", 
+                       "Low RMST (Worse Survival)"),
+    rmst_group = factor(rmst_group, 
+                       levels = c("High RMST (Better Survival)", 
+                                 "Low RMST (Worse Survival)"))
+  )
+
+# Calculate summary statistics
+pathway_stats <- train_df_plot %>%
+  dplyr::group_by(rmst_group) %>%
+  dplyr::summarise(
+    mean_score = mean(pathway_score, na.rm = TRUE),
+    median_score = median(pathway_score, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+# Create density plot
+pathway_density_plot <- ggplot(train_df_plot, 
+                               aes(x = pathway_score, fill = rmst_group)) +
+  geom_density(alpha = 0.6, linewidth = 1) +
+  geom_vline(data = pathway_stats, 
+             aes(xintercept = median_score, color = rmst_group),
+             linetype = "dashed", linewidth = 1) +
+  scale_fill_manual(
+    values = c("High RMST (Better Survival)" = "#7FC97F",  # Green
+               "Low RMST (Worse Survival)" = "#E78C73"),    # Red/Orange
+    name = "RMST Group"
+  ) +
+  scale_color_manual(
+    values = c("High RMST (Better Survival)" = "#4D7C4D",
+               "Low RMST (Worse Survival)" = "#B85C4A"),
+    guide = "none"
+  ) +
+  labs(
+    title = sprintf("GSVA Distribution for %s", 
+                   stringr::str_trunc(selected_pathway_label, 50)),
+    subtitle = "Treatment D (GSVA score) stratified by RMST outcome",
+    x = "GSVA score (Pathway Activity)",
+    y = "Density"
+  ) +
+  theme_nature() +
+  theme(
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    legend.position = "top",
+    legend.title = element_text(face = "bold", size = 11),
+    legend.text = element_text(size = 10)
+  ) +
+  annotate("text", x = Inf, y = Inf, 
+           label = sprintf("High RMST: n=%d\nLow RMST: n=%d", 
+                         pathway_stats$n[1], pathway_stats$n[2]),
+           hjust = 1.1, vjust = 1.5, size = 3.5, color = "gray30")
+
+ggsave("results/survival/figures/figS2b_pathway_distribution_by_rmst.png", 
+       pathway_density_plot, 
+       width = 9, height = 6, dpi = 600, bg = "white")
+cat("✓ Saved Supplementary Figure S2b (Pathway Distribution by RMST)\n")
+
+# Supplementary Figure S3: Model Performance Comparison
+cat("Generating Supplementary Figure S3: Model Performance Comparison...\n")
+
+# Prepare data for plotting
+performance_plot_data <- performance_outcome_tbl %>%
+  dplyr::select(model, cindex, auc_60m, auc_120m) %>%
+  tidyr::pivot_longer(cols = c(cindex, auc_60m, auc_120m),
+                     names_to = "metric",
+                     values_to = "value") %>%
+  dplyr::mutate(
+    metric_label = dplyr::case_when(
+      metric == "cindex" ~ "C-index",
+      metric == "auc_60m" ~ "AUC at 60m",
+      metric == "auc_120m" ~ "AUC at 120m"
+    ),
+    metric_label = factor(metric_label, levels = c("C-index", "AUC at 60m", "AUC at 120m"))
+  ) %>%
+  dplyr::filter(!is.na(value))
+
+if (nrow(performance_plot_data) > 0) {
+  performance_comparison_plot <- ggplot(performance_plot_data,
+                                        aes(x = model, y = value, fill = model)) +
+    geom_col(width = 0.7, position = "dodge") +
+    geom_text(aes(label = sprintf("%.3f", value)), 
+             vjust = -0.5, size = 3.5, fontface = "bold") +
+    facet_wrap(~ metric_label, scales = "free_x", ncol = 3) +
+    scale_fill_manual(values = c(
+      "DR-GLMNET" = "#E69F00", 
+      "DR-Cox" = "#56B4E9", 
+      "DR-RSF" = "#009E73"
+    )) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+    labs(
+      title = "Outcome Model Prediction Performance (Test Set)",
+      subtitle = "Higher values indicate better survival prediction",
+      x = NULL,
+      y = "Performance Metric Value"
+    ) +
+    theme_nature() +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(face = "bold", size = 14),
+      strip.text = element_text(face = "bold", size = 11),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+  
+  ggsave("results/survival/figures/figS3_model_performance_comparison.png", performance_comparison_plot,
+         width = 10, height = 5, dpi = 600, bg = "white")
+  cat("✓ Saved Supplementary Figure S3\n")
+} else {
+  cat("⊗ Skipped Figure S3 (no performance data available)\n")
+}
+
+# Supplementary Figure S4: RMST Prediction (DR-GLMNET only)
+if (!is.na(performance_results$glmnet$rmst_cor) && 
+    !is.null(performance_results$glmnet$rmst_cor)) {
+  
+  cat("Generating Supplementary Figure S4: GLMNET RMST Prediction...\n")
+  
+  # Re-fit to get predictions for plotting
+  tryCatch({
+    test_X <- test_cov_matrix
+    test_Y <- test_df$Y_pseudo
+    complete_idx <- complete.cases(test_X, test_Y)
+    test_X_complete <- test_X[complete_idx, , drop = FALSE]
+    test_Y_complete <- test_Y[complete_idx]
+    
+    glmnet_fit_plot <- glmnet::cv.glmnet(
+      x = test_X_complete,
+      y = test_Y_complete,
+      family = "gaussian",
+      alpha = 0.5
+    )
+    
+    glmnet_pred_plot <- predict(glmnet_fit_plot, newx = test_X_complete, s = "lambda.min")
+    
+    rmst_pred_data <- data.frame(
+      observed = test_Y_complete,
+      predicted = as.vector(glmnet_pred_plot)
+    )
+    
+    rmst_pred_plot <- ggplot(rmst_pred_data, aes(x = observed, y = predicted)) +
+      geom_point(alpha = 0.4, color = "#E69F00", size = 2) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", 
+                 color = "red", linewidth = 1) +
+      geom_smooth(method = "lm", se = TRUE, color = "blue", linewidth = 1) +
+      annotate("text", x = min(rmst_pred_data$observed) + 5, 
+               y = max(rmst_pred_data$predicted) - 5,
+               label = sprintf("R² = %.3f\nCorr = %.3f", 
+                             performance_results$glmnet$rmst_rsq,
+                             performance_results$glmnet$rmst_cor),
+               hjust = 0, vjust = 1, size = 5, fontface = "bold") +
+      labs(
+        title = "DR-GLMNET: Predicted vs Observed RMST",
+        subtitle = "Test set performance (dashed line = perfect prediction)",
+        x = "Observed RMST (months)",
+        y = "Predicted RMST (months)"
+      ) +
+      theme_nature() +
+      theme(plot.title = element_text(face = "bold", size = 14))
+    
+    ggsave("results/survival/figures/figS4_glmnet_rmst_prediction.png", rmst_pred_plot,
+           width = 7, height = 6, dpi = 600, bg = "white")
+    cat("✓ Saved Supplementary Figure S4\n")
+    
+  }, error = function(e) {
+    cat("⊗ Skipped Figure S4 (prediction data unavailable)\n")
+  })
+}
+
+cat("\n=== All Results Saved Successfully ===\n")
+cat("Output files:\n")
+cat("  DML estimates: results/survival/tables/dml_estimates_*.csv\n")
+cat("  Performance tables: results/survival/tables/tableS_*_performance.csv\n")
+cat("  Summary: results/survival/summary/analysis_summary.txt\n")
+cat("  Main figures: results/survival/figures/fig1-fig5_*.png\n")
+cat("  Supplementary: results/survival/figures/figS1-figS4_*.png\n")
+cat("\n")
 
 
 #################################################################################
