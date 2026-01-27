@@ -2566,7 +2566,14 @@ if (!is.null(roc_glmnet_obj) && !is.null(roc_rf_obj) && !is.null(roc_bart_obj)) 
     ) +
     coord_equal() +
     theme_nature() +
-    theme(legend.position = "bottom")
+    theme(
+      plot.title = element_text(size = plot_title_size, face = "bold"),
+      axis.title = element_text(size = plot_text_size, face = "bold"),
+      axis.text = element_text(size = plot_text_size),
+      legend.title = element_text(size = plot_text_size, face = "bold"),
+      legend.text = element_text(size = plot_text_size),
+      legend.position = "bottom"
+    )
   
   save_plot(next_fig_path("combined_roc_curves.png", dir = plots_dir), combined_roc_plot, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI)
   cat("Saved: Combined ROC curves\n")
