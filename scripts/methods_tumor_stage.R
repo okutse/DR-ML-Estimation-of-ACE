@@ -2,6 +2,12 @@
 # Author: Amos Okutse, Ian Liu
 # Date: Jan 2025
 
+# =============================================================================
+# Global Figure Parameters
+# =============================================================================
+FIGURE_WIDTH <- 10   # inches
+FIGURE_HEIGHT <- 5   # inches
+FIGURE_DPI <- 600    # resolution
 
 # Comparative Methods:
 #(1) DR Penalized Logistic Regression
@@ -38,6 +44,11 @@ library(msigdbr)       # MSigDB gene sets
 library(GSVA)          # pathway activity scoring
 library(ranger)        # fast random forests
 library(pROC)          # AUC computation
+library(ROCR)          # for PR-AUC computation
+library(tidyr)         # for data reshaping
+library(forcats)       # for factor manipulation
+library(viridis)       # for color scales
+library(ggridges)      # for ridge plots
 
 # install BiocManager if you don't have it (uncomment and run only run once)
 # if (!requireNamespace("BiocManager", quietly = TRUE)) {
@@ -58,17 +69,73 @@ source("scripts/helper.R")
 # Helper utilities used across the workflow
 # -----------------------------------------------------------------------------
 
-theme_nature <- function(base_size = 11, base_family = "Helvetica") {
+# Default inner plot text size (axis/legend/strip text, not titles)
+plot_text_size <- 14
+# Default plot title/subtitle sizes
+plot_title_size <- 20
+plot_subtitle_size <- 16
+# Default axis/legend sizes
+axis_title_size <- 16
+axis_text_size <- 14
+legend_title_size <- 16
+legend_text_size <- 14
+
+theme_nature <- function(base_size = 16, base_family = "Helvetica") {
   ggplot2::theme_minimal(base_size = base_size, base_family = base_family) +
     ggplot2::theme(
       panel.grid.major = ggplot2::element_line(color = "#E0E0E0", linewidth = 0.3),
       panel.grid.minor = ggplot2::element_blank(),
-      plot.title = ggplot2::element_text(face = "bold", size = base_size + 2),
-      plot.subtitle = ggplot2::element_text(color = "#4A4A4A"),
-      axis.title = ggplot2::element_text(face = "bold"),
+      plot.title = ggplot2::element_text(face = "bold", size = plot_title_size),
+      plot.subtitle = ggplot2::element_text(color = "#4A4A4A", size = plot_subtitle_size),
+      axis.title = ggplot2::element_text(face = "bold", size = axis_title_size),
+      axis.text = ggplot2::element_text(size = axis_text_size),
+      legend.text = ggplot2::element_text(size = legend_text_size),
+      strip.text = ggplot2::element_text(size = plot_text_size),
       legend.position = "right",
-      legend.title = ggplot2::element_text(face = "bold")
+      legend.title = ggplot2::element_text(face = "bold", size = legend_title_size)
     )
+}
+
+# Sequential figure naming helper (prefixes filenames with [a], [b], ...)
+fig_counter <- 0L
+next_fig_path <- function(filename, dir = ".") {
+  fig_counter <<- fig_counter + 1L
+  if (fig_counter <= length(letters)) {
+    label <- letters[fig_counter]
+  } else {
+    label <- paste0(letters[(fig_counter - 1L) %% length(letters) + 1L], fig_counter)
+  }
+  file.path(dir, sprintf("[%s]%s", label, filename))
+}
+
+# Plot export shape: "rect" (default), "square", or "free".
+plot_export_shape <- "rect"
+rect_export_size <- c(width = FIGURE_WIDTH, height = FIGURE_HEIGHT)
+save_plot <- function(..., shape = plot_export_shape, rect_size = rect_export_size) {
+  args <- list(...)
+  shape <- match.arg(shape, c("rect", "square", "free"))
+  if (shape == "square") {
+    if (!"width" %in% names(args)) {
+      args$width <- 7
+    }
+    if (!"height" %in% names(args)) {
+      args$height <- 7
+    }
+    side <- max(as.numeric(args$width), as.numeric(args$height), na.rm = TRUE)
+    args$width <- side
+    args$height <- side
+  } else if (shape == "rect") {
+    ratio <- rect_size["width"] / rect_size["height"]
+    if (!"width" %in% names(args) && !"height" %in% names(args)) {
+      args$width <- rect_size["width"]
+      args$height <- rect_size["height"]
+    } else if ("width" %in% names(args) && !"height" %in% names(args)) {
+      args$height <- as.numeric(args$width) / ratio
+    } else if (!"width" %in% names(args) && "height" %in% names(args)) {
+      args$width <- as.numeric(args$height) * ratio
+    }
+  }
+  do.call(ggplot2::ggsave, args)
 }
 
 stratified_split <- function(ids, strata, train_frac = 0.7, val_frac = 0.15, seed = 202501) {
@@ -126,6 +193,343 @@ stratified_split <- function(ids, strata, train_frac = 0.7, val_frac = 0.15, see
     val = unique(val_ids),
     test = unique(test_ids)
   )
+}
+
+log_split_summary <- function(ids, clin_df, label) {
+  stages <- clin_df$tumor_stage[match(ids, clin_df$patient_id)]
+  stage_tbl <- table(factor(stages, levels = c("early", "late")), useNA = "ifany")
+  cat(sprintf("[%s] n=%d (early=%d, late=%d, NA=%d)\n",
+              label,
+              length(ids),
+              stage_tbl["early"],
+              stage_tbl["late"],
+              stage_tbl["<NA>"]))
+  invisible(stage_tbl)
+}
+
+log_missing_summary <- function(df, label, top_n = 10) {
+  na_counts <- sort(colSums(is.na(df)), decreasing = TRUE)
+  total_rows <- nrow(df)
+  cat(sprintf("[%s] Missingness summary: %d rows\n", label, total_rows))
+  print(head(na_counts, top_n))
+  invisible(na_counts)
+}
+
+#' Compute comprehensive classification metrics
+compute_classification_metrics <- function(pred_prob, truth, threshold = 0.5) {
+  pred_class <- ifelse(pred_prob >= threshold, 1, 0)
+  
+  # Confusion matrix components
+  tp <- sum(pred_class == 1 & truth == 1)
+  tn <- sum(pred_class == 0 & truth == 0)
+  fp <- sum(pred_class == 1 & truth == 0)
+  fn <- sum(pred_class == 0 & truth == 1)
+  
+  # Metrics
+  accuracy <- (tp + tn) / (tp + tn + fp + fn)
+  balanced_accuracy <- ((tp / max(tp + fn, 1)) + (tn / max(tn + fp, 1))) / 2
+  precision <- tp / max(tp + fp, 1)
+  recall <- tp / max(tp + fn, 1)  # sensitivity
+  specificity <- tn / max(tn + fp, 1)
+  f1 <- 2 * precision * recall / max(precision + recall, 1e-10)
+  
+  # ROC AUC
+  roc_auc <- tryCatch({
+    roc_obj <- pROC::roc(response = truth, predictor = pred_prob, quiet = TRUE, direction = "<")
+    as.numeric(roc_obj$auc)
+  }, error = function(e) NA_real_)
+  
+  # PR AUC
+  pr_auc <- tryCatch({
+    fg <- pred_prob[truth == 1]
+    bg <- pred_prob[truth == 0]
+    if (length(fg) == 0 || length(bg) == 0) return(NA_real_)
+    pr <- ROCR::prediction(pred_prob, truth)
+    perf <- ROCR::performance(pr, "aucpr")
+    as.numeric(perf@y.values[[1]])
+  }, error = function(e) NA_real_)
+  
+  data.frame(
+    accuracy = accuracy,
+    balanced_accuracy = balanced_accuracy,
+    precision = precision,
+    recall = recall,
+    sensitivity = recall,
+    specificity = specificity,
+    f1 = f1,
+    roc_auc = roc_auc,
+    pr_auc = pr_auc,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Create calibration data for plotting
+create_calibration_data <- function(pred_prob, truth, n_bins = 10) {
+  bins <- cut(pred_prob, breaks = seq(0, 1, length.out = n_bins + 1), include.lowest = TRUE)
+  cal_df <- data.frame(pred = pred_prob, truth = truth, bin = bins) %>%
+    dplyr::group_by(bin) %>%
+    dplyr::summarise(
+      mean_pred = mean(pred, na.rm = TRUE),
+      mean_obs = mean(truth, na.rm = TRUE),
+      n = dplyr::n(),
+      se = sqrt(mean_obs * (1 - mean_obs) / max(n, 1)),
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(!is.na(mean_pred))
+  cal_df
+}
+
+#' Compute optimal threshold using Youden's J statistic
+compute_youden_threshold <- function(pred_prob, truth) {
+  tryCatch({
+    roc_obj <- pROC::roc(response = truth, predictor = pred_prob, quiet = TRUE, direction = "<")
+    coords <- pROC::coords(roc_obj, "best", best.method = "youden", ret = c("threshold", "sensitivity", "specificity"))
+    if (is.data.frame(coords)) {
+      coords <- coords[1, ]
+    }
+    list(
+      threshold = as.numeric(coords["threshold"]),
+      sensitivity = as.numeric(coords["sensitivity"]),
+      specificity = as.numeric(coords["specificity"]),
+      youden_j = as.numeric(coords["sensitivity"]) + as.numeric(coords["specificity"]) - 1
+    )
+  }, error = function(e) {
+    list(threshold = 0.5, sensitivity = NA_real_, specificity = NA_real_, youden_j = NA_real_)
+  })
+}
+
+#' Compute optimal threshold from PR curve (F1-optimal)
+compute_pr_optimal_threshold <- function(pred_prob, truth) {
+  tryCatch({
+    pred_obj <- ROCR::prediction(pred_prob, truth)
+    perf_pr <- ROCR::performance(pred_obj, "prec", "rec")
+    prec <- perf_pr@y.values[[1]]
+    rec <- perf_pr@x.values[[1]]
+    cutoffs <- pred_obj@cutoffs[[1]]
+    
+    f1 <- 2 * prec * rec / (prec + rec + 1e-10)
+    f1[is.na(f1)] <- 0
+    
+    best_idx <- which.max(f1)
+    list(
+      threshold = cutoffs[best_idx],
+      precision = prec[best_idx],
+      recall = rec[best_idx],
+      f1 = f1[best_idx]
+    )
+  }, error = function(e) {
+    list(threshold = 0.5, precision = NA_real_, recall = NA_real_, f1 = NA_real_)
+  })
+}
+
+#' Compute classification metrics at a specific threshold
+compute_metrics_at_threshold <- function(pred_prob, truth, threshold, threshold_name = "custom") {
+  pred_class <- ifelse(pred_prob >= threshold, 1, 0)
+  
+  tp <- sum(pred_class == 1 & truth == 1)
+  tn <- sum(pred_class == 0 & truth == 0)
+  fp <- sum(pred_class == 1 & truth == 0)
+  fn <- sum(pred_class == 0 & truth == 1)
+  
+  accuracy <- (tp + tn) / (tp + tn + fp + fn)
+  balanced_accuracy <- ((tp / max(tp + fn, 1)) + (tn / max(tn + fp, 1))) / 2
+  precision <- tp / max(tp + fp, 1)
+  recall <- tp / max(tp + fn, 1)
+  specificity <- tn / max(tn + fp, 1)
+  f1 <- 2 * precision * recall / max(precision + recall, 1e-10)
+  
+  data.frame(
+    threshold_type = threshold_name,
+    threshold = threshold,
+    accuracy = accuracy,
+    balanced_accuracy = balanced_accuracy,
+    precision = precision,
+    recall = recall,
+    sensitivity = recall,
+    specificity = specificity,
+    f1 = f1,
+    tp = tp, tn = tn, fp = fp, fn = fn,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Create confusion matrix visualization
+create_confusion_matrix_plot <- function(pred_prob, truth, threshold, model_name, split_name, threshold_type = "0.5") {
+  pred_class <- ifelse(pred_prob >= threshold, 1, 0)
+  
+  cm <- table(Predicted = factor(pred_class, levels = c(0, 1), labels = c("Early", "Late")),
+              Actual = factor(truth, levels = c(0, 1), labels = c("Early", "Late")))
+  
+  cm_df <- as.data.frame(cm)
+  
+  total <- sum(cm_df$Freq)
+  cm_df$Percentage <- round(cm_df$Freq / total * 100, 1)
+  cm_df$Label <- sprintf("%d\n(%.1f%%)", cm_df$Freq, cm_df$Percentage)
+  
+  ggplot(cm_df, aes(x = Actual, y = Predicted, fill = Freq)) +
+    geom_tile(color = "white", linewidth = 1) +
+    geom_text(aes(label = Label), size = 6, color = "white") +
+    scale_fill_gradient(low = "#3C8DAD", high = "#1F4E5F", name = "Count") +
+    labs(
+      title = sprintf("Confusion Matrix: %s (%s)", model_name, split_name),
+      subtitle = sprintf("Threshold: %.3f (%s)", threshold, threshold_type),
+      x = "Actual Label",
+      y = "Predicted Label"
+    ) +
+    theme_nature() +
+    theme(legend.position = "none") +
+    coord_fixed()
+}
+
+#' Create ROC curve plot
+create_roc_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, model_name,
+                                  threshold_adj = NULL, threshold_label = "Youden") {
+  roc_val <- tryCatch(pROC::roc(response = truth_val, predictor = pred_val, quiet = TRUE, direction = "<"), error = function(e) NULL)
+  roc_test <- tryCatch(pROC::roc(response = truth_test, predictor = pred_test, quiet = TRUE, direction = "<"), error = function(e) NULL)
+  
+  if (is.null(roc_val) || is.null(roc_test)) return(NULL)
+  
+  roc_val_df <- data.frame(
+    fpr = 1 - roc_val$specificities,
+    tpr = roc_val$sensitivities,
+    split = "Validation"
+  )
+  roc_test_df <- data.frame(
+    fpr = 1 - roc_test$specificities,
+    tpr = roc_test$sensitivities,
+    split = "Test"
+  )
+  roc_data <- dplyr::bind_rows(roc_val_df, roc_test_df)
+  
+  p <- ggplot(roc_data, aes(x = fpr, y = tpr, color = split)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+    geom_line(linewidth = 1.2, alpha = 0.9) +
+    scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
+    labs(
+      title = sprintf("ROC Curve for Tumor Stage Prediction: %s", model_name),
+      subtitle = sprintf("Val AUC: %.3f | Test AUC: %.3f", as.numeric(roc_val$auc), as.numeric(roc_test$auc)),
+      x = "1 - Specificity (False Positive Rate)",
+      y = "Sensitivity (True Positive Rate)",
+      color = "Split"
+    ) +
+    coord_equal() +
+    theme_nature() +
+    theme(legend.position = "right")
+  if (!is.null(threshold_adj) && is.finite(threshold_adj)) {
+    pred_class <- ifelse(pred_test >= threshold_adj, 1, 0)
+    tp <- sum(pred_class == 1 & truth_test == 1)
+    tn <- sum(pred_class == 0 & truth_test == 0)
+    fp <- sum(pred_class == 1 & truth_test == 0)
+    fn <- sum(pred_class == 0 & truth_test == 1)
+    sensitivity <- tp / max(tp + fn, 1)
+    specificity <- tn / max(tn + fp, 1)
+    roc_point <- data.frame(
+      fpr = 1 - specificity,
+      tpr = sensitivity,
+      split = "Test"
+    )
+    p <- p +
+      geom_point(data = roc_point, aes(x = fpr, y = tpr), color = "black", size = 2) +
+      geom_text(
+        data = roc_point,
+        aes(x = fpr, y = tpr, label = sprintf("%s=%.3f", threshold_label, threshold_adj)),
+        color = "black",
+        hjust = -0.1,
+        vjust = -0.5,
+        size = 3
+      )
+  }
+  p
+}
+
+#' Create PR curve plot
+create_pr_curve_plot <- function(pred_val, truth_val, pred_test, truth_test, model_name,
+                                 threshold_adj = NULL, threshold_label = "Youden") {
+  pr_val <- tryCatch(ROCR::prediction(pred_val, truth_val), error = function(e) NULL)
+  pr_test <- tryCatch(ROCR::prediction(pred_test, truth_test), error = function(e) NULL)
+  
+  if (is.null(pr_val) || is.null(pr_test)) return(NULL)
+  
+  perf_val <- ROCR::performance(pr_val, "prec", "rec")
+  perf_test <- ROCR::performance(pr_test, "prec", "rec")
+  
+  pr_val_df <- data.frame(
+    recall = perf_val@x.values[[1]],
+    precision = perf_val@y.values[[1]],
+    split = "Validation"
+  ) %>% dplyr::filter(!is.na(precision))
+  
+  pr_test_df <- data.frame(
+    recall = perf_test@x.values[[1]],
+    precision = perf_test@y.values[[1]],
+    split = "Test"
+  ) %>% dplyr::filter(!is.na(precision))
+  
+  pr_data <- dplyr::bind_rows(pr_val_df, pr_test_df)
+  baseline <- mean(c(truth_val, truth_test))
+  
+  p <- ggplot(pr_data, aes(x = recall, y = precision, color = split)) +
+    geom_hline(yintercept = baseline, linetype = "dashed", color = "gray50") +
+    geom_line(linewidth = 1.2, alpha = 0.9) +
+    scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
+    labs(
+      title = sprintf("Precision-Recall Curve for Tumor Stage Prediction: %s", model_name),
+      subtitle = sprintf("Baseline (class proportion): %.3f", baseline),
+      x = "Recall (Sensitivity)",
+      y = "Precision (Positive Predictive Value)",
+      color = "Split"
+    ) +
+    coord_cartesian(ylim = c(0, 1)) +
+    theme_nature() +
+    theme(legend.position = "right")
+  if (!is.null(threshold_adj) && is.finite(threshold_adj)) {
+    pred_class <- ifelse(pred_test >= threshold_adj, 1, 0)
+    tp <- sum(pred_class == 1 & truth_test == 1)
+    fp <- sum(pred_class == 1 & truth_test == 0)
+    fn <- sum(pred_class == 0 & truth_test == 1)
+    precision <- tp / max(tp + fp, 1)
+    recall <- tp / max(tp + fn, 1)
+    pr_point <- data.frame(
+      recall = recall,
+      precision = precision,
+      split = "Test"
+    )
+    p <- p +
+      geom_point(data = pr_point, aes(x = recall, y = precision), color = "black", size = 2) +
+      geom_text(
+        data = pr_point,
+        aes(x = recall, y = precision, label = sprintf("%s=%.3f", threshold_label, threshold_adj)),
+        color = "black",
+        hjust = -0.1,
+        vjust = -0.5,
+        size = 3
+      )
+  }
+  p
+}
+
+#' Create calibration plot
+create_calibration_plot <- function(pred_val, truth_val, pred_test, truth_test, model_name) {
+  cal_val <- create_calibration_data(pred_val, truth_val) %>% dplyr::mutate(split = "Validation")
+  cal_test <- create_calibration_data(pred_test, truth_test) %>% dplyr::mutate(split = "Test")
+  cal_data <- dplyr::bind_rows(cal_val, cal_test)
+  
+  ggplot(cal_data, aes(x = mean_pred, y = mean_obs, color = split)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+    geom_point(aes(size = n), alpha = 0.7) +
+    geom_errorbar(aes(ymin = pmax(0, mean_obs - 1.96 * se), ymax = pmin(1, mean_obs + 1.96 * se)), width = 0.02, alpha = 0.5) +
+    geom_line(alpha = 0.7) +
+    scale_color_manual(values = c("Validation" = "#F8766D", "Test" = "#00BA38")) +
+    scale_size_continuous(range = c(2, 8), name = "N obs") +
+    labs(
+      title = sprintf("Calibration Plot for Tumor Stage Prediction: %s", model_name),
+      subtitle = "Perfect calibration lies on the diagonal",
+      x = "Mean Predicted Probability",
+      y = "Observed Proportion",
+      color = "Split"
+    ) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+    theme_nature()
 }
 
 fit_imputer <- function(df, variables) {
@@ -485,6 +889,8 @@ sapply(cp, function(x) sum(is.na(x)) )
 # merge clinical sample and patient data
 dt <- merge(cs, cp, by = "patient_id", all.x = TRUE)
 names(dt)
+cat(sprintf("Merged clinical data: %d patients, %d columns\n", nrow(dt), ncol(dt)))
+log_missing_summary(dt, "clinical_merged")
  
 #################################################################################
 # mRNA expression data ----
@@ -514,6 +920,9 @@ colnames(exp_mat) <- colnames(mexp)[-c(1,2)]
 common_samples <- intersect(colnames(exp_mat), dt$patient_id) # 1980 samples
 exp_mat <- exp_mat[ , common_samples, drop = FALSE]
 
+cat(sprintf("Expression matrix after filtering to common samples: %d genes x %d samples\n",
+            nrow(exp_mat), ncol(exp_mat)))
+
 
 dt2 <- dt %>%
   dplyr::filter(patient_id %in% common_samples) %>%
@@ -522,6 +931,9 @@ dt2 <- dt %>%
 dt2 <- dt2[!is.na(dt2$tumor_stage), ] # filter to non-missing tumor stage
 cat("dt2 after filtering to non-missing tumor stage: ", nrow(dt2), " rows\n")
 cat("dt2 columns:", paste(colnames(dt2), collapse=", "), "\n")
+cat(sprintf("Tumor stage distribution overall: early=%d, late=%d\n",
+            sum(dt2$tumor_stage == "early", na.rm = TRUE),
+            sum(dt2$tumor_stage == "late", na.rm = TRUE)))
 exp_mat <- exp_mat[, dt2$patient_id, drop = FALSE] # keep only subjects with observed tumor stage to align ids
 grp <- factor(dt2$tumor_stage, levels = c("early", "late")) # early = 1338; late = 128; n = 1466 samples
 table(grp)
@@ -565,13 +977,62 @@ split_stage_summary <- lapply(
 print("Tumor stage distribution by split:")
 print(split_stage_summary)
 
+cat("Split sample counts and stage breakdown:\n")
+log_split_summary(train_ids, dt2, "train")
+log_split_summary(val_ids, dt2, "val")
+log_split_summary(test_ids, dt2, "test")
+
 collapse_duplicate_genes <- function(mat) {
   rn <- rownames(mat)
+  dup_gene_names <- unique(rn[duplicated(rn)])
+  n_dup_gene_rows <- sum(duplicated(rn))
+  n_dup_gene_names <- length(dup_gene_names)
+
+  cn <- colnames(mat)
+  dup_col_names <- unique(cn[duplicated(cn)])
+  n_dup_col_cols <- sum(duplicated(cn))
+  n_dup_col_names <- length(dup_col_names)
+
+  if (n_dup_gene_names > 0 || n_dup_col_names > 0) {
+    cat(sprintf("Duplicate genes detected: %d rows across %d gene names.\n",
+                n_dup_gene_rows, n_dup_gene_names))
+    cat(sprintf("Duplicate columns detected: %d columns across %d column names.\n",
+                n_dup_col_cols, n_dup_col_names))
+  }
+
+  if (n_dup_gene_names > 0) {
+    cat("First 20 duplicate gene names:\n")
+    print(utils::head(dup_gene_names, 20))
+
+    k <- min(3, ncol(mat))
+    if (k > 0) {
+      gene_means_list <- lapply(utils::head(dup_gene_names, 20), function(g) {
+        sub_mat <- mat[rn == g, seq_len(k), drop = FALSE]
+        data.frame(
+          gene = g,
+          t(colMeans(sub_mat, na.rm = TRUE)),
+          stringsAsFactors = FALSE
+        )
+      })
+      gene_means_df <- dplyr::bind_rows(gene_means_list)
+      colnames(gene_means_df)[-1] <- paste0("mean_col", seq_len(k))
+      cat(sprintf("Mean of columns 1..%d before collapse (first 20 duplicate genes):\n", k))
+      print(gene_means_df)
+    }
+  }
+
+  if (n_dup_col_names > 0) {
+    cat("First 20 duplicate column names:\n")
+    print(utils::head(dup_col_names, 20))
+  }
+
   if (anyDuplicated(rn)) {
     warning("Detected duplicated gene symbols; collapsing by mean expression.")
     summed <- rowsum(mat, rn)
     counts <- as.numeric(table(rn)[rownames(summed)])
     mat <- sweep(summed, 1, counts, "/")
+    cat(sprintf("Collapsed %d duplicated rows into %d unique gene rows.\n",
+                n_dup_gene_rows, n_dup_gene_names))
   }
   mat
 }
@@ -580,6 +1041,13 @@ collapse_duplicate_genes <- function(mat) {
 train_mat_raw <- exp_mat[, train_ids, drop = FALSE]
 val_mat_raw <- exp_mat[, val_ids, drop = FALSE]
 test_mat_raw <- exp_mat[, test_ids, drop = FALSE]
+
+cat(sprintf("Preprocessing input dimensions (genes x samples): train=%d x %d, val=%d x %d, test=%d x %d\n",
+            nrow(train_mat_raw), ncol(train_mat_raw),
+            nrow(val_mat_raw), ncol(val_mat_raw),
+            nrow(test_mat_raw), ncol(test_mat_raw)))
+cat(sprintf("Preprocessing totals: genes=%d, samples=%d, entries=%d\n",
+            nrow(exp_mat), ncol(exp_mat), nrow(exp_mat) * ncol(exp_mat)))
 
 ## Preprocess
 # qn_reference <- compute_qn_reference(train_mat_raw)
@@ -612,6 +1080,13 @@ expr_train = collapse_duplicate_genes(train_mat_raw)
 expr_val = collapse_duplicate_genes(val_mat_raw)
 expr_test = collapse_duplicate_genes(test_mat_raw)
 
+cat(sprintf("Postprocessing dimensions (genes x samples): train=%d x %d, val=%d x %d, test=%d x %d\n",
+            nrow(expr_train), ncol(expr_train),
+            nrow(expr_val), ncol(expr_val),
+            nrow(expr_test), ncol(expr_test)))
+cat(sprintf("Postprocessing totals: genes=%d, samples=%d, entries=%d\n",
+            nrow(expr_train), ncol(expr_train), nrow(expr_train) * ncol(expr_train)))
+
 expr_splits <- list(
   train = expr_train,
   val = expr_val,
@@ -627,6 +1102,9 @@ stopifnot(
   identical(colnames(expr_splits$val), clinical_splits$val$patient_id),
   identical(colnames(expr_splits$test), clinical_splits$test$patient_id)
 )
+
+cat(sprintf("Aligned splits: train=%d, val=%d, test=%d\n",
+            nrow(clinical_splits$train), nrow(clinical_splits$val), nrow(clinical_splits$test)))
 
 ## Diagnostic plots on train set
 train_plot_df <- data.frame(
@@ -665,6 +1143,8 @@ dt_train <- dt_train_all[stage_complete, , drop = FALSE]
 
 expr_train_stage <- expr_train[, dt_train$patient_id, drop = FALSE]
 expr_filt <- expr_train_stage[keep_genes, , drop = FALSE]
+cat(sprintf("DEG filtering: %d genes retained out of %d (train stage subset)\n",
+            nrow(expr_filt), nrow(expr_train_stage)))
 
 grp_train <- factor(dt_train$tumor_stage, levels = c("early", "late"))
 stopifnot(length(grp_train) == ncol(expr_filt))
@@ -728,6 +1208,7 @@ if (!nrow(deg_limma_selected)) {
 
 deg_genes <- deg_limma_selected$gene
 length(deg_genes)
+cat(sprintf("DEGs selected for downstream: %d genes\n", length(deg_genes)))
 
 # Separate up vs down gene sets (useful for enrichment or signed analyses)
 deg_genes_up   <- deg_limma_selected %>% filter(logFC >=  lfc_cut) %>% pull(gene)
@@ -799,20 +1280,26 @@ volcano_plot <- ggplot(volcano_data, aes(x = logFC, y = neglog10_adjP, color = a
   )) +
   labs(
     title = "(a)", #Volcano plot of DEGs in late vs early breast cancer tumor stages
-    x = "log2 Fold Change (Late vs Early)",
+    x = "log2 Fold Change (Late vs Early Stage)",
     y = "-log10(FDR)",
     color = "DEG class"
   ) +
-  theme_nature()
+  theme_nature() +
+  theme(
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 16),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text = element_text(size = 16)
+  )
 
 volcano_plot
 # save the 600 dpi image in results folder
-ggsave(
-  filename = "results/[a]limma_deg_volcano_plot.png",
+save_plot(
+  filename = next_fig_path("limma_deg_volcano_plot.png", dir = "results/5-fold-results"),
   plot = volcano_plot,
-  width = 6,
-  height = 5,
-  dpi = 600
+  width = FIGURE_WIDTH,
+  height = FIGURE_HEIGHT,
+  dpi = FIGURE_DPI
 )
 
 # Top DEG genes for downstream analyses (fallback to overall top-ranked genes if up/down tables are empty)
@@ -842,15 +1329,20 @@ boxplot_top_degs <- ggplot(exp_top_df, aes(x = tumor_stage, y = expression, fill
   labs(title = "(b)", # Expression of top DEGs by breast cancer tumor stage [not strictly necessary except to show distributions]
        x = "Tumor Stage",
        y = "Expression scores") +
-  theme(legend.position = "none")+
-  theme_nature()
+  theme(legend.position = "none") +
+  theme_nature() +
+  theme(
+    plot.title = element_text(size = 20, face = "bold"),
+    plot.subtitle = element_text(size = 16),
+    strip.text = element_text(size = 16)
+  )
 boxplot_top_degs
 # save the 600 dpi image in results folder
-ggsave(boxplot_top_degs,
-       filename = "results/[b]top_degs_boxplot.png",
-       width = 8,
-       height = 6,
-       dpi = 600
+save_plot(boxplot_top_degs,
+       filename = next_fig_path("top_degs_boxplot.png", dir = "results/5-fold-results"),
+       width = FIGURE_WIDTH,
+       height = FIGURE_HEIGHT,
+       dpi = FIGURE_DPI
 )
 
 #################################################################################
@@ -870,6 +1362,14 @@ bc_terms <- msigdbr::msigdbr(
   dplyr::filter(stringr::str_detect(gs_name, "BREAST|MAMMARY|BRCA|ERBB2|HER2|ESTROGEN|LUMINAL|BASAL", negate = FALSE)) %>%
   dplyr::select(gs_name, gene_symbol) %>%
   dplyr::distinct()
+
+# print(bc_terms)
+
+# print(msigdbr::msigdbr(
+#   species = "Homo sapiens", 
+#   collection = "C2",
+#   subcollection = "CP" # canonical pathways: 
+# ) %>% dplyr::select(gs_name, gene_symbol) %>% dplyr::distinct() %>% head() )
 
 if (!nrow(bc_terms)) {
   message("No breast cancer-specific CGP sets found; defaulting to Hallmark collection.")
@@ -938,16 +1438,98 @@ gsva_plot_df <- gsva_rank_tbl %>%
 
 gsva_rank_plot <- ggplot(gsva_plot_df, aes(x = delta, y = ID, size = abs(delta), color = -log10(p_adjust))) +
   geom_point(alpha = 0.85) +
-  scale_color_gradient(low = "#97C4BC", high = "#1F78B4", name = "-log10 adj p") +
+  scale_color_gradient(low = "#97C4BC", high = "#1F78B4", name = "-log10(adj.p)") +
+  scale_size_continuous(range = c(3, 8), name = "Absolute delta") +
   labs(
     title = "Breast cancer relevant GSVA ranking",
-    subtitle = "Top pathways by GSVA score contrast (late vs early)",
+    subtitle = "Top pathways by GSVA score contrast (late vs early stage)",
     x = "GSVA score delta (late - early)",
     y = NULL,
     size = "Absolute delta"
   ) +
-  theme_nature()
+  theme_nature() +
+  theme(
+    plot.title = element_text(face = "bold", size = 20),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    axis.text.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16),
+    axis.title.x = element_text(size = 18, face = "bold")
+  ) +
+  guides(
+    color = guide_colorbar(
+      title = "-log10(adj.p)",
+      title.position = "top",
+      title.hjust = 0.5,
+      barwidth = 8,
+      barheight = 0.8
+    ),
+    size = guide_legend(
+      title = "Absolute delta",
+      title.position = "top",
+      title.hjust = 0.5,
+      nrow = 1
+    )
+  )
 gsva_rank_plot
+save_plot(
+  filename = next_fig_path("gsva_ranking_plot.png", dir = "results/5-fold-results"),
+  plot = gsva_rank_plot,
+  width = FIGURE_WIDTH,
+  height = FIGURE_HEIGHT,
+  dpi = FIGURE_DPI
+)
+
+gsva_top5_df <- gsva_rank_tbl %>%
+  dplyr::slice_head(n = 5) %>%
+  dplyr::mutate(ID = stats::reorder(ID, delta))
+
+gsva_rank_plot_top5 <- ggplot(gsva_top5_df, aes(x = delta, y = ID, size = abs(delta), color = -log10(p_adjust))) +
+  geom_point(alpha = 0.85) +
+  scale_color_gradient(low = "#97C4BC", high = "#1F78B4", name = "-log10(adj.p)") +
+  scale_size_continuous(range = c(3, 8), name = "Absolute delta") +
+  labs(
+    title = "Breast cancer relevant GSVA ranking",
+    subtitle = "Top 5 pathways by GSVA score contrast (late vs early)",
+    x = "GSVA score delta (late - early)",
+    y = NULL,
+    size = "Absolute delta"
+  ) +
+  theme_nature() +
+  theme(
+    plot.title = element_text(face = "bold", size = 20),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    axis.text.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16),
+    axis.title.x = element_text(size = 18, face = "bold")
+  ) +
+  guides(
+    color = guide_colorbar(
+      title = "-log10(adj.p)",
+      title.position = "top",
+      title.hjust = 0.5,
+      barwidth = 8,
+      barheight = 0.8
+    ),
+    size = guide_legend(
+      title = "Absolute delta",
+      title.position = "top",
+      title.hjust = 0.5,
+      nrow = 1
+    )
+  )
+
+gsva_rank_plot_top5
+save_plot(
+  filename = next_fig_path("gsva_ranking_plot_top5.png", dir = "results/5-fold-results"),
+  plot = gsva_rank_plot_top5,
+  width = FIGURE_WIDTH,
+  height = FIGURE_HEIGHT,
+  dpi = FIGURE_DPI
+)
 
 selected_pathway <- gsva_rank_tbl %>% dplyr::slice_head(n = 1)
 
@@ -1037,6 +1619,12 @@ names(pathway_scores) <- names(gsva_scores)
 train_pathway_df <- pathway_scores$train %>%
   dplyr::left_join(clinical_splits$train %>% dplyr::select(patient_id, tumor_stage), by = "patient_id")
 
+cat(sprintf("GSVA scores computed for pathway '%s' (train=%d, val=%d, test=%d)\n",
+            selected_pathway_label,
+            nrow(pathway_scores$train),
+            nrow(pathway_scores$val),
+            nrow(pathway_scores$test)))
+
 gsva_density_plot <- ggplot(train_pathway_df, aes(x = pathway_score, fill = tumor_stage)) +
   geom_density(alpha = 0.65) +
   labs(
@@ -1047,8 +1635,21 @@ gsva_density_plot <- ggplot(train_pathway_df, aes(x = pathway_score, fill = tumo
     fill = "Tumor stage"
   ) +
   scale_fill_manual(values = c("early" = "#63A375", "late" = "#E4572E")) +
-  theme_nature()
+  theme_nature() +
+  theme(
+    plot.title = element_text(size = 20, face = "bold"),
+    plot.subtitle = element_text(size = 16),
+    legend.title = element_text(size = 18, face = "bold"),
+    legend.text = element_text(size = 16)
+  )
 gsva_density_plot
+save_plot(
+  filename = next_fig_path("gsva_distribution_by_stage_train.png", dir = "results/5-fold-results"),
+  plot = gsva_density_plot,
+  width = FIGURE_WIDTH,
+  height = FIGURE_HEIGHT,
+  dpi = FIGURE_DPI
+)
 
 nonsynonymous_classes <- c(
   "Missense_Mutation", "Frame_Shift_Del", "Frame_Shift_Ins",
@@ -1113,6 +1714,9 @@ val_df <- assemble_split_df(clinical_splits$val, "val")
 test_df <- assemble_split_df(clinical_splits$test, "test")
 trainval_df <- dplyr::bind_rows(train_df, val_df)
 full_df <- dplyr::bind_rows(train_df, val_df, test_df)
+
+cat(sprintf("Assembled analysis tables: train=%d, val=%d, test=%d, trainval=%d, full=%d\n",
+            nrow(train_df), nrow(val_df), nrow(test_df), nrow(trainval_df), nrow(full_df)))
 
 adjustment_covariates <- c(
   "age_at_diagnosis",
@@ -1184,11 +1788,15 @@ covariate_association <- lapply(adjustment_covariates, function(var) {
     stat <- if (is.null(fit)) NA_real_ else summary(fit)$r.squared
     data.frame(variable = var, metric = "R^2", value = stat)
   }
-}) %>% dplyr::bind_rows()
+}) %>% dplyr::bind_rows() 
+
 
 print("Association between GSVA treatment and covariates:")
 print(covariate_association)
 
+
+print( covariate_association |> dplyr::arrange(metric, desc(value)))
+print( covariate_association |> dplyr::arrange(desc(metric), desc(value)))
 
 
 #################################################################################
@@ -1262,6 +1870,25 @@ dml_full_tbl <- run_split_dml(full_df, "all")
 print("Doubly robust estimates when pooling train/val/test (exploratory full-data fit):")
 print(dml_full_tbl)
 # Best practice: Clearly label pooled fits as exploratory because no holdout remains—regulators expect confirmatory claims to rely on untouched test data.
+
+causal_effects_summary <- dplyr::bind_rows(dml_split_tbl, dml_full_tbl) %>%
+  dplyr::mutate(
+    sd = se,
+    effect_minus_sd = theta - sd,
+    effect_plus_sd = theta + sd
+  ) %>%
+  dplyr::arrange(split, model)
+
+print("Causal effect summary (theta ± sd) by split and model:")
+print(causal_effects_summary %>%
+        dplyr::select(split, model, theta, sd, effect_minus_sd, effect_plus_sd, ci_lower, ci_upper))
+
+effects_dir <- file.path("results", "5-fold-results")
+dir.create(effects_dir, recursive = TRUE, showWarnings = FALSE)
+write.csv(causal_effects_summary,
+          file.path(effects_dir, "causal_effects_summary.csv"),
+          row.names = FALSE)
+cat("Saved: Causal effect summary CSV\n")
 
 dr_effects_tbl <- dml_split_tbl %>% dplyr::filter(split == "train")
 
@@ -1411,3 +2038,599 @@ clinical_sensitivity_tbl <- dplyr::tibble(
 )
 print("Sensitivity (clinical-only covariates) DR estimates:")
 print(clinical_sensitivity_tbl)
+
+
+#################################################################################
+# Comprehensive Visualizations ----
+################################################################################
+
+cat("\n=== Generating comprehensive visualization plots ===\n\n")
+
+# Create results directory for plots
+plots_dir <- file.path("results", "5-fold-results","plots")
+dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+
+#-------------------------------------------------------------------------------
+# 1. DR Effect Forest Plot (theta estimates across splits and models)
+#-------------------------------------------------------------------------------
+
+if (nrow(dml_split_tbl)) {
+  forest_plot_data <- dml_split_tbl %>%
+    dplyr::mutate(
+      split = factor(split, levels = c("train", "val", "test")),
+      model = factor(model, levels = c("DR-GLMNET", "DR-RF", "DR-BART"))
+    )
+  
+  dr_forest_plot <- ggplot(forest_plot_data, aes(x = theta, y = interaction(model, split), color = model)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.5) +
+    geom_errorbarh(aes(xmin = ci_lower, xmax = ci_upper), height = 0.2, linewidth = 0.8) +
+    geom_point(size = 3) +
+    scale_color_manual(values = c("DR-GLMNET" = "#E41A1C", "DR-RF" = "#377EB8", "DR-BART" = "#4DAF4A")) +
+    labs(
+      title = "Doubly Robust Effect Estimates (Forest Plot)",
+      subtitle = sprintf("Treatment: %s pathway GSVA score", selected_pathway_label),
+      x = expression(paste("Estimated Effect (", theta, ")")),
+      y = "Model × Split",
+      color = "Model"
+    ) +
+    theme_nature() +
+    theme(
+      plot.title = element_text(size = 20, face = "bold"),
+      plot.subtitle = element_text(size = 16),
+      plot.caption = element_text(size = 16),
+      axis.text.y = element_text(size = 16),
+      legend.position = "bottom"
+    )
+  
+  save_plot(
+    filename = next_fig_path("dr_effect_forest_plot.png", dir = plots_dir),
+    plot = dr_forest_plot,
+    width = FIGURE_WIDTH,
+    height = FIGURE_HEIGHT,
+    dpi = FIGURE_DPI
+  )
+  cat("Saved: DR effect forest plot\n")
+}
+
+#-------------------------------------------------------------------------------
+# 2. Model Stability Across Data Splits
+#-------------------------------------------------------------------------------
+
+if (nrow(dml_split_tbl)) {
+  stability_plot_data <- dplyr::bind_rows(
+    dml_split_tbl %>% dplyr::mutate(dataset_type = "CV Split"),
+    dml_full_tbl %>% dplyr::mutate(dataset_type = "Full Data")
+  ) %>%
+    dplyr::mutate(
+      split = dplyr::case_when(
+        split == "train" ~ "Train",
+        split == "val" ~ "Val",
+        split == "test" ~ "Test",
+        split == "all" ~ "Full",
+        TRUE ~ split
+      ),
+      split = factor(split, levels = c("Train", "Val", "Test", "Full")),
+      model = factor(model, levels = c("DR-BART", "DR-GLMNET", "DR-RF"))
+    )
+
+  stability_cv <- stability_plot_data %>% dplyr::filter(dataset_type == "CV Split")
+  stability_full <- stability_plot_data %>% dplyr::filter(dataset_type == "Full Data")
+  dodge_split <- position_dodge(width = 0.25)
+
+  stability_plot <- ggplot(stability_plot_data, aes(x = split, y = theta, color = model, shape = dataset_type)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.6) +
+    geom_errorbar(
+      data = stability_plot_data,
+      aes(ymin = ci_lower, ymax = ci_upper),
+      width = 0.12,
+      linewidth = 0.9,
+      position = dodge_split
+    ) +
+    geom_line(
+      data = stability_cv,
+      aes(group = model),
+      linewidth = 1.2,
+      position = dodge_split
+    ) +
+    geom_point(
+      data = stability_cv,
+      size = 3.2,
+      position = dodge_split
+    ) +
+    geom_point(
+      data = stability_full,
+      size = 3.6,
+      position = dodge_split
+    ) +
+    scale_color_manual(values = c("DR-BART" = "#56B4E9", "DR-GLMNET" = "#E69F00", "DR-RF" = "#009E73")) +
+    scale_shape_manual(values = c("CV Split" = 16, "Full Data" = 17)) +
+    labs(
+      title = "Model Stability of Tumor Stage Prediction Across Data Splits",
+      subtitle = "Consistent estimates indicate robust causal effect",
+      x = "Data Split",
+      y = expression(paste("Treatment Effect Estimate (", theta, ")")),
+      color = "DR Method",
+      shape = "Dataset Type"
+    ) +
+    theme_nature() +
+    theme(
+      plot.title = element_text(size = 20, face = "bold"),
+      legend.position = "bottom"
+    )
+
+  save_plot(
+    filename = next_fig_path("stability_across_splits.png", dir = plots_dir),
+    plot = stability_plot,
+    width = FIGURE_WIDTH,
+    height = FIGURE_HEIGHT,
+    dpi = FIGURE_DPI
+  )
+  cat("Saved: Model stability across splits plot\n")
+}
+
+#-------------------------------------------------------------------------------
+# 3. Model Performance Comparison (AUC and C-index)
+#-------------------------------------------------------------------------------
+
+if (nrow(model_metrics)) {
+  metrics_long <- model_metrics %>%
+    tidyr::pivot_longer(cols = c(test_auc, test_cindex), names_to = "metric", values_to = "value") %>%
+    dplyr::mutate(
+      metric = dplyr::case_when(
+        metric == "test_auc" ~ "ROC-AUC",
+        metric == "test_cindex" ~ "C-Index",
+        TRUE ~ metric
+      )
+    )
+  
+  performance_bar_plot <- ggplot(metrics_long, aes(x = model, y = value, fill = metric)) +
+    geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.9) +
+    geom_text(aes(label = sprintf("%.3f", value)), 
+              position = position_dodge(width = 0.8), vjust = -0.5, size = 3.5) +
+    scale_fill_manual(values = c("ROC-AUC" = "#2166AC", "C-Index" = "#B2182B")) +
+    labs(
+      title = "Model Performance Comparison (Test Set) for Tumor Stage Prediction",
+      x = "Model",
+      y = "Metric Value",
+      fill = "Metric"
+    ) +
+    coord_cartesian(ylim = c(0, 1)) +
+    theme_nature() +
+    theme(
+      plot.title = element_text(size = 20, face = "bold"),
+      axis.text.x = element_text(size = 16),
+      legend.position = "top"
+    )
+  
+  save_plot(
+    filename = next_fig_path("model_performance_comparison.png", dir = plots_dir),
+    plot = performance_bar_plot,
+    width = FIGURE_WIDTH,
+    height = FIGURE_HEIGHT,
+    dpi = FIGURE_DPI
+  )
+  cat("Saved: Model performance comparison bar plot\n")
+}
+
+#-------------------------------------------------------------------------------
+# 4. Compute validation predictions for ROC/PR curves
+#-------------------------------------------------------------------------------
+
+# Get validation predictions
+val_cov_df <- apply_imputer(val_df, cov_imputer_trainval)
+X_val_cov <- model.matrix(cov_formula, data = val_cov_df)
+X_val_full <- cbind(pathway_score = val_df$pathway_score, X_val_cov)
+glmnet_val_pred <- as.numeric(stats::predict(glmnet_classifier, newx = X_val_full, s = "lambda.min", type = "response"))
+
+rf_val_df <- apply_imputer(val_df, rf_imputer)
+rf_val_pred_mat <- predict(rf_classifier, data = rf_val_df)$predictions
+rf_val_pred <- if (is.matrix(rf_val_pred_mat)) {
+  as.numeric(rf_val_pred_mat[, "1", drop = TRUE])
+} else {
+  as.numeric(rf_val_pred_mat)
+}
+
+bart_val_fit <- BART::pbart(
+  x.train = X_trainval_full,
+  y.train = trainval_df$tumor_stage_binary,
+  x.test = X_val_full,
+  ntree = 200,
+  ndpost = 1500,
+  nskip = 500,
+  usequants = TRUE,
+  sparse = TRUE
+)
+bart_val_pred <- as.numeric(bart_val_fit$prob.test.mean)
+
+# Training predictions for per-split metrics
+train_cov_df <- apply_imputer(train_df, cov_imputer_trainval)
+X_train_cov <- model.matrix(cov_formula, data = train_cov_df)
+X_train_full <- cbind(pathway_score = train_df$pathway_score, X_train_cov)
+glmnet_train_pred <- as.numeric(stats::predict(glmnet_classifier, newx = X_train_full, s = "lambda.min", type = "response"))
+
+rf_train_pred_mat <- predict(rf_classifier, data = apply_imputer(train_df, rf_imputer))$predictions
+rf_train_pred <- if (is.matrix(rf_train_pred_mat)) {
+  as.numeric(rf_train_pred_mat[, "1", drop = TRUE])
+} else {
+  as.numeric(rf_train_pred_mat)
+}
+
+bart_train_fit <- BART::pbart(
+  x.train = X_trainval_full,
+  y.train = trainval_df$tumor_stage_binary,
+  x.test = X_train_full,
+  ntree = 200,
+  ndpost = 1500,
+  nskip = 500,
+  usequants = TRUE,
+  sparse = TRUE
+)
+bart_train_pred <- as.numeric(bart_train_fit$prob.test.mean)
+
+glmnet_full_pred <- c(glmnet_train_pred, glmnet_val_pred, glmnet_test_pred)
+rf_full_pred <- c(rf_train_pred, rf_val_pred, rf_test_pred)
+bart_full_pred <- c(bart_train_pred, bart_val_pred, bart_test_pred)
+
+#-------------------------------------------------------------------------------
+# 4.5 Thresholds for adjusted performance (Youden)
+#-------------------------------------------------------------------------------
+
+youden_glmnet <- compute_youden_threshold(glmnet_test_pred, test_df$tumor_stage_binary)
+youden_rf <- compute_youden_threshold(rf_test_pred, test_df$tumor_stage_binary)
+youden_bart <- compute_youden_threshold(bart_test_pred, test_df$tumor_stage_binary)
+
+#-------------------------------------------------------------------------------
+# 5. ROC Curves for all models (default and adjusted thresholds)
+#-------------------------------------------------------------------------------
+
+roc_glmnet_youden <- create_roc_curve_plot(glmnet_val_pred, val_df$tumor_stage_binary, 
+                                           glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET",
+                                           threshold_adj = youden_glmnet$threshold, threshold_label = "Youden")
+roc_rf_youden <- create_roc_curve_plot(rf_val_pred, val_df$tumor_stage_binary, 
+                                       rf_test_pred, test_df$tumor_stage_binary, "DR-RF",
+                                       threshold_adj = youden_rf$threshold, threshold_label = "Youden")
+roc_bart_youden <- create_roc_curve_plot(bart_val_pred, val_df$tumor_stage_binary, 
+                                         bart_test_pred, test_df$tumor_stage_binary, "DR-BART",
+                                         threshold_adj = youden_bart$threshold, threshold_label = "Youden")
+
+roc_glmnet_default <- create_roc_curve_plot(glmnet_val_pred, val_df$tumor_stage_binary, 
+                                            glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET",
+                                            threshold_adj = 0.5, threshold_label = "Default 0.5")
+roc_rf_default <- create_roc_curve_plot(rf_val_pred, val_df$tumor_stage_binary, 
+                                        rf_test_pred, test_df$tumor_stage_binary, "DR-RF",
+                                        threshold_adj = 0.5, threshold_label = "Default 0.5")
+roc_bart_default <- create_roc_curve_plot(bart_val_pred, val_df$tumor_stage_binary, 
+                                          bart_test_pred, test_df$tumor_stage_binary, "DR-BART",
+                                          threshold_adj = 0.5, threshold_label = "Default 0.5")
+
+if (!is.null(roc_glmnet_youden)) {
+  save_plot(next_fig_path("roc_curve_glmnet_youden.png", dir = plots_dir), roc_glmnet_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
+}
+if (!is.null(roc_rf_youden)) {
+  save_plot(next_fig_path("roc_curve_rf_youden.png", dir = plots_dir), roc_rf_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
+}
+if (!is.null(roc_bart_youden)) {
+  save_plot(next_fig_path("roc_curve_bart_youden.png", dir = plots_dir), roc_bart_youden, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
+}
+if (!is.null(roc_glmnet_default)) {
+  save_plot(next_fig_path("roc_curve_glmnet_default0p5.png", dir = plots_dir), roc_glmnet_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
+}
+if (!is.null(roc_rf_default)) {
+  save_plot(next_fig_path("roc_curve_rf_default0p5.png", dir = plots_dir), roc_rf_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
+}
+if (!is.null(roc_bart_default)) {
+  save_plot(next_fig_path("roc_curve_bart_default0p5.png", dir = plots_dir), roc_bart_default, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, shape = "square")
+}
+cat("Saved: ROC curves for all models (Youden and default)\n")
+
+#-------------------------------------------------------------------------------
+# 6. PR Curves for all models (default and adjusted thresholds)
+#-------------------------------------------------------------------------------
+
+pr_glmnet_youden <- create_pr_curve_plot(glmnet_val_pred, val_df$tumor_stage_binary, 
+                                         glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET",
+                                         threshold_adj = youden_glmnet$threshold, threshold_label = "Youden")
+pr_rf_youden <- create_pr_curve_plot(rf_val_pred, val_df$tumor_stage_binary, 
+                                     rf_test_pred, test_df$tumor_stage_binary, "DR-RF",
+                                     threshold_adj = youden_rf$threshold, threshold_label = "Youden")
+pr_bart_youden <- create_pr_curve_plot(bart_val_pred, val_df$tumor_stage_binary, 
+                                       bart_test_pred, test_df$tumor_stage_binary, "DR-BART",
+                                       threshold_adj = youden_bart$threshold, threshold_label = "Youden")
+
+pr_glmnet_default <- create_pr_curve_plot(glmnet_val_pred, val_df$tumor_stage_binary, 
+                                          glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET",
+                                          threshold_adj = 0.5, threshold_label = "Default 0.5")
+pr_rf_default <- create_pr_curve_plot(rf_val_pred, val_df$tumor_stage_binary, 
+                                      rf_test_pred, test_df$tumor_stage_binary, "DR-RF",
+                                      threshold_adj = 0.5, threshold_label = "Default 0.5")
+pr_bart_default <- create_pr_curve_plot(bart_val_pred, val_df$tumor_stage_binary, 
+                                        bart_test_pred, test_df$tumor_stage_binary, "DR-BART",
+                                        threshold_adj = 0.5, threshold_label = "Default 0.5")
+
+if (!is.null(pr_glmnet_youden)) {
+  save_plot(next_fig_path("pr_curve_glmnet_youden.png", dir = plots_dir), pr_glmnet_youden, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
+}
+if (!is.null(pr_rf_youden)) {
+  save_plot(next_fig_path("pr_curve_rf_youden.png", dir = plots_dir), pr_rf_youden, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
+}
+if (!is.null(pr_bart_youden)) {
+  save_plot(next_fig_path("pr_curve_bart_youden.png", dir = plots_dir), pr_bart_youden, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
+}
+if (!is.null(pr_glmnet_default)) {
+  save_plot(next_fig_path("pr_curve_glmnet_default0p5.png", dir = plots_dir), pr_glmnet_default, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
+}
+if (!is.null(pr_rf_default)) {
+  save_plot(next_fig_path("pr_curve_rf_default0p5.png", dir = plots_dir), pr_rf_default, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
+}
+if (!is.null(pr_bart_default)) {
+  save_plot(next_fig_path("pr_curve_bart_default0p5.png", dir = plots_dir), pr_bart_default, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI, shape = "square")
+}
+cat("Saved: PR curves for all models (Youden and default)\n")
+
+#-------------------------------------------------------------------------------
+# 7. Calibration Plots for all models
+#-------------------------------------------------------------------------------
+
+cal_glmnet <- create_calibration_plot(glmnet_val_pred, val_df$tumor_stage_binary, 
+                                       glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET")
+cal_rf <- create_calibration_plot(rf_val_pred, val_df$tumor_stage_binary, 
+                                   rf_test_pred, test_df$tumor_stage_binary, "DR-RF")
+cal_bart <- create_calibration_plot(bart_val_pred, val_df$tumor_stage_binary, 
+                                     bart_test_pred, test_df$tumor_stage_binary, "DR-BART")
+
+save_plot(next_fig_path("calibration_glmnet.png", dir = plots_dir), cal_glmnet, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+save_plot(next_fig_path("calibration_rf.png", dir = plots_dir), cal_rf, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+save_plot(next_fig_path("calibration_bart.png", dir = plots_dir), cal_bart, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+cat("Saved: Calibration plots for all models\n")
+
+#-------------------------------------------------------------------------------
+# 8. Confusion Matrices for test set (Youden and default thresholds)
+#-------------------------------------------------------------------------------
+
+cm_glmnet <- create_confusion_matrix_plot(glmnet_test_pred, test_df$tumor_stage_binary, 
+                                          youden_glmnet$threshold, "DR-GLMNET", "Test", "Youden")
+cm_rf <- create_confusion_matrix_plot(rf_test_pred, test_df$tumor_stage_binary, 
+                                      youden_rf$threshold, "DR-RF", "Test", "Youden")
+cm_bart <- create_confusion_matrix_plot(bart_test_pred, test_df$tumor_stage_binary, 
+                                        youden_bart$threshold, "DR-BART", "Test", "Youden")
+
+cm_glmnet_default <- create_confusion_matrix_plot(glmnet_test_pred, test_df$tumor_stage_binary, 
+                                                  0.5, "DR-GLMNET", "Test", "Default 0.5")
+cm_rf_default <- create_confusion_matrix_plot(rf_test_pred, test_df$tumor_stage_binary, 
+                                              0.5, "DR-RF", "Test", "Default 0.5")
+cm_bart_default <- create_confusion_matrix_plot(bart_test_pred, test_df$tumor_stage_binary, 
+                                                0.5, "DR-BART", "Test", "Default 0.5")
+
+save_plot(next_fig_path("confusion_matrix_glmnet_youden.png", dir = plots_dir), cm_glmnet, width = 6, height = 5, dpi = 600)
+save_plot(next_fig_path("confusion_matrix_rf_youden.png", dir = plots_dir), cm_rf, width = 6, height = 5, dpi = 600)
+save_plot(next_fig_path("confusion_matrix_bart_youden.png", dir = plots_dir), cm_bart, width = 6, height = 5, dpi = 600)
+save_plot(next_fig_path("confusion_matrix_glmnet_default0p5.png", dir = plots_dir), cm_glmnet_default, width = 6, height = 5, dpi = 600)
+save_plot(next_fig_path("confusion_matrix_rf_default0p5.png", dir = plots_dir), cm_rf_default, width = 6, height = 5, dpi = 600)
+save_plot(next_fig_path("confusion_matrix_bart_default0p5.png", dir = plots_dir), cm_bart_default, width = 6, height = 5, dpi = 600)
+cat("Saved: Confusion matrices for all models (Youden and default)\n")
+
+#-------------------------------------------------------------------------------
+# 9. Comprehensive Metrics Table
+#-------------------------------------------------------------------------------
+
+compute_split_metrics <- function(pred, truth, model_name, split_label) {
+  youden <- compute_youden_threshold(pred, truth)
+  auc_tbl <- compute_classification_metrics(pred, truth, 0.5)
+  dplyr::bind_rows(
+    compute_metrics_at_threshold(pred, truth, youden$threshold, threshold_name = "Youden"),
+    compute_metrics_at_threshold(pred, truth, 0.5, threshold_name = "Default0.5")
+  ) %>%
+    dplyr::mutate(
+      roc_auc = auc_tbl$roc_auc,
+      pr_auc = auc_tbl$pr_auc,
+      model = model_name,
+      split = split_label
+    )
+}
+
+comprehensive_metrics <- dplyr::bind_rows(
+  compute_split_metrics(glmnet_train_pred, train_df$tumor_stage_binary, "DR-GLMNET", "Train"),
+  compute_split_metrics(glmnet_val_pred, val_df$tumor_stage_binary, "DR-GLMNET", "Validation"),
+  compute_split_metrics(glmnet_test_pred, test_df$tumor_stage_binary, "DR-GLMNET", "Test"),
+  compute_split_metrics(glmnet_full_pred, full_df$tumor_stage_binary, "DR-GLMNET", "All"),
+  compute_split_metrics(rf_train_pred, train_df$tumor_stage_binary, "DR-RF", "Train"),
+  compute_split_metrics(rf_val_pred, val_df$tumor_stage_binary, "DR-RF", "Validation"),
+  compute_split_metrics(rf_test_pred, test_df$tumor_stage_binary, "DR-RF", "Test"),
+  compute_split_metrics(rf_full_pred, full_df$tumor_stage_binary, "DR-RF", "All"),
+  compute_split_metrics(bart_train_pred, train_df$tumor_stage_binary, "DR-BART", "Train"),
+  compute_split_metrics(bart_val_pred, val_df$tumor_stage_binary, "DR-BART", "Validation"),
+  compute_split_metrics(bart_test_pred, test_df$tumor_stage_binary, "DR-BART", "Test"),
+  compute_split_metrics(bart_full_pred, full_df$tumor_stage_binary, "DR-BART", "All")
+) %>%
+  dplyr::select(
+    threshold_type, threshold,
+    accuracy, balanced_accuracy, precision, recall, sensitivity, specificity, f1,
+    tp, tn, fp, fn, roc_auc, pr_auc, model, split
+  )
+
+print("Comprehensive classification metrics by split (Youden + Default0.5 thresholds):")
+print(comprehensive_metrics)
+
+write.csv(comprehensive_metrics, file.path(plots_dir, "comprehensive_metrics.csv"), row.names = FALSE)
+cat("Saved: Comprehensive metrics CSV\n")
+
+#-------------------------------------------------------------------------------
+# 10. Prediction Distribution Plot (Ridge plot)
+#-------------------------------------------------------------------------------
+
+pred_dist_df <- dplyr::bind_rows(
+  data.frame(pred = glmnet_test_pred, truth = test_df$tumor_stage_binary, model = "DR-GLMNET", split = "Test"),
+  data.frame(pred = rf_test_pred, truth = test_df$tumor_stage_binary, model = "DR-RF", split = "Test"),
+  data.frame(pred = bart_test_pred, truth = test_df$tumor_stage_binary, model = "DR-BART", split = "Test")
+) %>%
+  dplyr::mutate(
+    truth_label = factor(ifelse(truth == 1, "Late", "Early"), levels = c("Early", "Late"))
+  )
+
+pred_dist_plot <- ggplot(pred_dist_df, aes(x = pred, y = model, fill = truth_label)) +
+  geom_density_ridges(alpha = 0.7, scale = 1.2, rel_min_height = 0.01) +
+  scale_fill_manual(values = c("Early" = "#4DAF4A", "Late" = "#E41A1C")) +
+  labs(
+    title = "Predicted Probability Distributions of Tumor Stage",
+    subtitle = "Test set predictions across models",
+    x = "Predicted Probability (Late Stage)",
+    y = "Model",
+    fill = "True Stage"
+  ) +
+  theme_nature() +
+  theme(legend.position = "right")
+
+# Load ggridges if available
+if (requireNamespace("ggridges", quietly = TRUE)) {
+  library(ggridges)
+  save_plot(next_fig_path("prediction_distribution_ridge.png", dir = plots_dir), pred_dist_plot, width = 9, height = 5, dpi = 600)
+  cat("Saved: Prediction distribution ridge plot\n")
+}
+
+#-------------------------------------------------------------------------------
+# 11. Sensitivity Analysis Forest Plot
+#-------------------------------------------------------------------------------
+
+sensitivity_comparison <- dplyr::bind_rows(
+  dml_split_tbl %>% dplyr::filter(split == "train") %>% dplyr::mutate(covariate_set = "Full"),
+  clinical_sensitivity_tbl %>% dplyr::mutate(split = "train", covariate_set = "Clinical-only")
+)
+
+sensitivity_forest_plot <- ggplot(sensitivity_comparison, aes(x = theta, y = model, color = covariate_set)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.5) +
+  geom_errorbarh(aes(xmin = ci_lower, xmax = ci_upper), height = 0.2, linewidth = 0.8, 
+                 position = position_dodge(width = 0.4)) +
+  geom_point(size = 3, position = position_dodge(width = 0.4)) +
+  scale_color_manual(values = c("Full" = "#2166AC", "Clinical-only" = "#B2182B")) +
+  labs(
+    title = "Sensitivity Analysis for Tumor Stage Prediction: \nEffect of Covariate Set",
+    subtitle = "Comparing full covariate set vs clinical-only (train split)",
+    x = expression(paste("Estimated Effect (", theta, ")")),
+    y = "Model",
+    color = "Covariate Set"
+  ) +
+  theme_nature() +
+  theme(
+    plot.title = element_text(size = 20, face = "bold"),
+    axis.text.x = element_text(size = 16),
+    legend.position = "bottom"
+  )
+
+save_plot(next_fig_path("sensitivity_analysis_forest.png", dir = plots_dir), sensitivity_forest_plot, width = 8, height = 5, dpi = 600)
+cat("Saved: Sensitivity analysis forest plot\n")
+
+#-------------------------------------------------------------------------------
+# 12. Covariate Association Heatmap
+#-------------------------------------------------------------------------------
+
+if (nrow(covariate_association)) {
+  cov_assoc_plot <- ggplot(covariate_association, aes(x = variable, y = 1, fill = value)) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(aes(label = sprintf("%.2f", value)), size = 3, color = "white") +
+    scale_fill_viridis(option = "plasma", name = "Association", na.value = "gray80") +
+    labs(
+      title = "Covariate-Treatment Association",
+      subtitle = "Association between GSVA pathway score and adjustment covariates",
+      x = "Covariate",
+      y = NULL
+    ) +
+    theme_nature() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank()
+    ) +
+    coord_fixed(ratio = 0.8)
+  
+  save_plot(next_fig_path("covariate_association_heatmap.png", dir = plots_dir), cov_assoc_plot, width = 12, height = 4, dpi = 600)
+  cat("Saved: Covariate association heatmap\n")
+}
+
+#-------------------------------------------------------------------------------
+# 13. GSVA Score vs Tumor Stage Violin Plot
+#-------------------------------------------------------------------------------
+
+gsva_violin_df <- full_df %>%
+  dplyr::select(patient_id, pathway_score, tumor_stage, split) %>%
+  dplyr::mutate(tumor_stage = factor(tumor_stage, levels = c("early", "late"), labels = c("Early", "Late")))
+
+gsva_violin_plot <- ggplot(gsva_violin_df, aes(x = tumor_stage, y = pathway_score, fill = tumor_stage)) +
+  geom_violin(alpha = 0.7, draw_quantiles = c(0.25, 0.5, 0.75)) +
+  geom_jitter(width = 0.1, alpha = 0.3, size = 0.8) +
+  facet_wrap(~ split, nrow = 1) +
+  scale_fill_manual(values = c("Early" = "#4DAF4A", "Late" = "#E41A1C")) +
+  labs(
+    title = sprintf("GSVA Score Distribution: %s", selected_pathway_label),
+    subtitle = "Treatment variable distribution by tumor stage and split",
+    x = "Tumor Stage",
+    y = "GSVA Score (Pathway Activity)",
+    fill = "Tumor Stage"
+  ) +
+  theme_nature() +
+  theme(legend.position = "none")
+
+save_plot(next_fig_path("gsva_violin_by_stage_split.png", dir = plots_dir), gsva_violin_plot, width = 10, height = 5, dpi = 600)
+cat("Saved: GSVA violin plot by stage and split\n")
+
+#-------------------------------------------------------------------------------
+# 14. Combined ROC curves (all models in one plot)
+#-------------------------------------------------------------------------------
+
+roc_glmnet_obj <- tryCatch(pROC::roc(response = test_df$tumor_stage_binary, predictor = glmnet_test_pred, quiet = TRUE), error = function(e) NULL)
+roc_rf_obj <- tryCatch(pROC::roc(response = test_df$tumor_stage_binary, predictor = rf_test_pred, quiet = TRUE), error = function(e) NULL)
+roc_bart_obj <- tryCatch(pROC::roc(response = test_df$tumor_stage_binary, predictor = bart_test_pred, quiet = TRUE), error = function(e) NULL)
+
+if (!is.null(roc_glmnet_obj) && !is.null(roc_rf_obj) && !is.null(roc_bart_obj)) {
+  combined_roc_df <- dplyr::bind_rows(
+    data.frame(fpr = 1 - roc_glmnet_obj$specificities, tpr = roc_glmnet_obj$sensitivities, 
+               model = sprintf("DR-GLMNET (AUC=%.3f)", as.numeric(roc_glmnet_obj$auc))),
+    data.frame(fpr = 1 - roc_rf_obj$specificities, tpr = roc_rf_obj$sensitivities, 
+               model = sprintf("DR-RF (AUC=%.3f)", as.numeric(roc_rf_obj$auc))),
+    data.frame(fpr = 1 - roc_bart_obj$specificities, tpr = roc_bart_obj$sensitivities, 
+               model = sprintf("DR-BART (AUC=%.3f)", as.numeric(roc_bart_obj$auc)))
+  )
+  
+  combined_roc_plot <- ggplot(combined_roc_df, aes(x = fpr, y = tpr, color = model)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+    geom_line(linewidth = 1.2, alpha = 0.9) +
+    scale_color_manual(values = c("#E41A1C", "#377EB8", "#4DAF4A")) +
+    labs(
+      title = "ROC Curves for Tumor Stage Prediction: All Models (Test Set)",
+      x = "1 - Specificity (False Positive Rate)",
+      y = "Sensitivity (True Positive Rate)",
+      color = "Model"
+    ) +
+    coord_equal() +
+    theme_nature() +
+    theme(
+      plot.title = element_text(size = plot_title_size, face = "bold"),
+      axis.title = element_text(size = plot_text_size, face = "bold"),
+      axis.text = element_text(size = plot_text_size),
+      legend.title = element_text(size = plot_text_size, face = "bold"),
+      legend.text = element_text(size = plot_text_size),
+      legend.position = "bottom"
+    )
+  
+  save_plot(next_fig_path("combined_roc_curves.png", dir = plots_dir), combined_roc_plot, width = FIGURE_WIDTH, height = FIGURE_WIDTH, dpi = FIGURE_DPI)
+  cat("Saved: Combined ROC curves\n")
+}
+
+#-------------------------------------------------------------------------------
+# 15. Summary panel (combine key plots)
+#-------------------------------------------------------------------------------
+
+if (exists("dr_forest_plot") && exists("combined_roc_plot") && exists("gsva_violin_plot")) {
+  summary_panel <- cowplot::plot_grid(
+    dr_forest_plot + theme(legend.position = "none"),
+    combined_roc_plot + theme(legend.position = "none"),
+    gsva_violin_plot + theme(legend.position = "none"),
+    ncol = 1,
+    labels = c("A", "B", "C"),
+    label_size = 14
+  )
+  
+  save_plot(next_fig_path("summary_panel.png", dir = plots_dir), summary_panel, width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI)
+  cat("Saved: Summary panel\n")
+}
+
+cat(sprintf("\n=== All visualization plots saved to: %s ===\n\n", plots_dir))

@@ -13,7 +13,6 @@ FIGURE_DPI <- 600    # resolution
 #(1) DR Penalized Logistic Regression
 #(2) DR Random Forest
 #(3) DR BART
-#(4) DR Logistic regression on categorized DEGs (low, mid, high expression levels based on quantiles)
 
 ## Load required packages
 required_pkgs <- c("msigdbr", "GSVA", "ranger", "pROC")
@@ -2567,8 +2566,8 @@ if (!is.null(roc_glmnet_obj) && !is.null(roc_rf_obj) && !is.null(roc_bart_obj)) 
     coord_equal() +
     theme_nature() +
     theme(
-      plot.title = element_text(size = plot_title_size, face = "bold"),
-      axis.title = element_text(size = plot_text_size, face = "bold"),
+      plot.title = element_text(size = plot_title_size + 1, face = "bold"),
+      axis.title = element_text(size = plot_text_size + 1, face = "bold"),
       axis.text = element_text(size = plot_text_size),
       legend.title = element_text(size = plot_text_size, face = "bold"),
       legend.text = element_text(size = plot_text_size),
