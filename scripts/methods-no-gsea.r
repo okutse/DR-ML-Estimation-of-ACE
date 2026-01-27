@@ -72,13 +72,15 @@ source("scripts/helper.R")
 
 # Default inner plot text size (axis/legend/strip text, not titles)
 plot_text_size <- 16
+# Default plot title font size
+plot_title_size <- plot_text_size + 2
 
 theme_nature <- function(base_size = 11, base_family = "Helvetica") {
   ggplot2::theme_minimal(base_size = base_size, base_family = base_family) +
     ggplot2::theme(
       panel.grid.major = ggplot2::element_line(color = "#E0E0E0", linewidth = 0.3),
       panel.grid.minor = ggplot2::element_blank(),
-      plot.title = ggplot2::element_text(face = "bold", size = base_size + 2),
+      plot.title = ggplot2::element_text(face = "bold", size = plot_title_size),
       plot.subtitle = ggplot2::element_text(color = "#4A4A4A"),
       axis.title = ggplot2::element_text(face = "bold"),
       axis.text = ggplot2::element_text(size = plot_text_size),
@@ -2437,7 +2439,7 @@ pred_dist_plot <- ggplot(pred_dist_df, aes(x = pred, y = model, fill = truth_lab
   geom_density_ridges(alpha = 0.7, scale = 1.2, rel_min_height = 0.01) +
   scale_fill_manual(values = c("Early" = "#4DAF4A", "Late" = "#E41A1C")) +
   labs(
-    title = "Predicted Probability Distributions of Tumor Stage Predictions by True Class",
+    title = "Predicted Probability Distributions of Tumor Stage",
     subtitle = "Test set predictions across models",
     x = "Predicted Probability (Late Stage)",
     y = "Model",
@@ -2469,7 +2471,7 @@ sensitivity_forest_plot <- ggplot(sensitivity_comparison, aes(x = theta, y = mod
   geom_point(size = 3, position = position_dodge(width = 0.4)) +
   scale_color_manual(values = c("Full" = "#2166AC", "Clinical-only" = "#B2182B")) +
   labs(
-    title = "Sensitivity Analysis for Tumor Stage Prediction: Effect of Covariate Set",
+    title = "Sensitivity Analysis for Tumor Stage Prediction: \nEffect of Covariate Set",
     subtitle = "Comparing full covariate set vs clinical-only (train split)",
     x = expression(paste("Estimated Effect (", theta, ")")),
     y = "Model",
@@ -2589,4 +2591,3 @@ if (exists("dr_forest_plot") && exists("combined_roc_plot") && exists("gsva_viol
 }
 
 cat(sprintf("\n=== All visualization plots saved to: %s ===\n\n", plots_dir))
-
