@@ -63,16 +63,18 @@ source("scripts/survival_helpers.R")
 # Helper utilities used across the workflow
 # -----------------------------------------------------------------------------
 
-theme_nature <- function(base_size = 11, base_family = "Helvetica") {
+theme_nature <- function(base_size = 16, base_family = "Helvetica") {
   ggplot2::theme_minimal(base_size = base_size, base_family = base_family) +
     ggplot2::theme(
       panel.grid.major = ggplot2::element_line(color = "#E0E0E0", linewidth = 0.3),
       panel.grid.minor = ggplot2::element_blank(),
-      plot.title = ggplot2::element_text(face = "bold", size = base_size + 2),
-      plot.subtitle = ggplot2::element_text(color = "#4A4A4A"),
-      axis.title = ggplot2::element_text(face = "bold"),
+      plot.title = ggplot2::element_text(face = "bold", size = base_size + 4),
+      plot.subtitle = ggplot2::element_text(color = "#4A4A4A", size = base_size),
+      axis.title = ggplot2::element_text(face = "bold", size = base_size),
+      axis.text = ggplot2::element_text(size = base_size - 2),
       legend.position = "right",
-      legend.title = ggplot2::element_text(face = "bold")
+      legend.title = ggplot2::element_text(face = "bold", size = base_size),
+      legend.text = ggplot2::element_text(size = base_size - 2)
     )
 }
 
@@ -1177,11 +1179,11 @@ volcano_plot <- ggplot(volcano_data,
     panel.background = element_rect(fill = "white", color = NA),
     plot.background = element_rect(fill = "white", color = NA),
     legend.position = "right",
-    legend.title = element_text(face = "bold", size = 9),
-    legend.text = element_text(size = 8),
-    legend.key.size = unit(0.4, "cm"),
-    axis.title = element_text(size = 10, face = "bold"),
-    axis.text = element_text(size = 9, color = "black"),
+    legend.title = element_text(face = "bold", size = 16),
+    legend.text = element_text(size = 16),
+    legend.key.size = unit(0.6, "cm"),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text = element_text(size = 16, color = "black"),
     axis.line = element_line(color = "black", linewidth = 0.5),
     axis.ticks = element_line(color = "black", linewidth = 0.3)
   )
@@ -1232,12 +1234,12 @@ if (nrow(deg_tbl) > 0) {
       ) +
       theme_nature() +
       theme(
-        plot.title = element_text(face = "bold", size = 13),
-        plot.subtitle = element_text(size = 10, color = "gray40"),
+        plot.title = element_text(face = "bold", size = 20),
+        plot.subtitle = element_text(size = 16, color = "gray40"),
         legend.position = "top",
         axis.text.x = element_blank(),
         axis.ticks.x = element_blank(),
-        strip.text = element_text(size = 8, face = "bold")
+        strip.text = element_text(size = 16, face = "bold")
       )
     
     ggsave("results/survival/figures/deg_top_genes_boxplot_binary_rmst.png",
@@ -2358,11 +2360,11 @@ forest_plot <- ggplot(forest_data, aes(x = theta, y = model, color = model, shap
   ) +
   theme_nature() +
   theme(
-    plot.title = element_text(face = "bold", size = 14),
-    plot.subtitle = element_text(size = 10, color = "gray30"),
-    plot.caption = element_text(size = 8, color = "gray50", hjust = 0),
+    plot.title = element_text(face = "bold", size = 20),
+    plot.subtitle = element_text(size = 16, color = "gray30"),
+    plot.caption = element_text(size = 16, color = "gray50", hjust = 0),
     legend.position = "right",
-    axis.text.y = element_text(size = 11)
+    axis.text.y = element_text(size = 16)
   )
 
 ggsave("results/survival/figures/fig1_forest_plot_combined.png", forest_plot, 
@@ -2415,7 +2417,7 @@ stability_plot <- ggplot(stability_data,
   theme_nature() +
   theme(
     legend.position = "bottom",
-    plot.title = element_text(face = "bold", size = 14)
+    plot.title = element_text(face = "bold", size = 20)
   ) +
   guides(
     color = guide_legend(order = 1, nrow = 1),
@@ -2465,10 +2467,10 @@ if (has_survminer) {
     ylab = "Survival Probability",
     legend.title = "Pathway Activity",
     legend.labs = c("Low", "High"),
-    font.main = c(14, "bold"),
-    font.x = c(12, "plain"),
-    font.y = c(12, "plain"),
-    font.tickslab = c(10, "plain")
+    font.main = c(20, "bold"),
+    font.x = c(18, "plain"),
+    font.y = c(18, "plain"),
+    font.tickslab = c(16, "plain")
   )
   
   # Save
@@ -2509,10 +2511,10 @@ if (has_survminer) {
         ylab = "Survival Probability",
         legend.title = "Tumor Stage",
         legend.labs = c("Early", "Late"),
-        font.main = c(14, "bold"),
-        font.x = c(12, "plain"),
-        font.y = c(12, "plain"),
-        font.tickslab = c(10, "plain")
+        font.main = c(20, "bold"),
+        font.x = c(18, "plain"),
+        font.y = c(18, "plain"),
+        font.tickslab = c(16, "plain")
       )
       
       ggsave("results/survival/figures/fig3b_km_curve_tumor_stage.png", 
@@ -2540,7 +2542,7 @@ scatter_rmst <- train_df %>%
     y = "RMST Pseudo-outcome (months)"
   ) +
   theme_nature() +
-  theme(plot.title = element_text(face = "bold", size = 14))
+  theme(plot.title = element_text(face = "bold", size = 20))
 
 ggsave("results/survival/figures/fig4_scatter_pathway_rmst.png", scatter_rmst, 
        width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
@@ -2575,8 +2577,8 @@ sensitivity_plot <- ggplot(sensitivity_comparison,
   theme_nature() +
   theme(
     legend.position = "none",
-    plot.title = element_text(face = "bold", size = 14),
-    axis.text.x = element_text(size = 11)
+    plot.title = element_text(face = "bold", size = 20),
+    axis.text.x = element_text(size = 16)
   )
 
 ggsave("results/survival/figures/fig5_sensitivity_clinical_vs_full.png", sensitivity_plot, 
@@ -2620,7 +2622,7 @@ event_rate_plot <- ggplot(event_by_quartile,
   theme_nature() +
   theme(
     legend.position = "none",
-    plot.title = element_text(face = "bold", size = 14)
+    plot.title = element_text(face = "bold", size = 20)
   )
 
 ggsave("results/survival/figures/figS1_event_rate_by_quartile.png", event_rate_plot, 
@@ -2655,9 +2657,9 @@ gsva_rank_plot <- ggplot(gsva_plot_df,
     legend.position = "bottom",
     legend.direction = "horizontal",
     legend.box = "horizontal",
-    axis.text.y = element_text(size = 10),
-    axis.text.x = element_text(size = 11),
-    axis.title.x = element_text(size = 12, face = "bold")
+    axis.text.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16),
+    axis.title.x = element_text(size = 18, face = "bold")
   ) +
   guides(
     color = guide_colorbar(title = "-log10(adj.p)", 
@@ -2726,16 +2728,16 @@ pathway_density_plot <- ggplot(train_df_plot,
   ) +
   theme_nature() +
   theme(
-    plot.title = element_text(face = "bold", size = 13),
-    plot.subtitle = element_text(size = 10, color = "gray40"),
+    plot.title = element_text(face = "bold", size = 20),
+    plot.subtitle = element_text(size = 16, color = "gray40"),
     legend.position = "top",
-    legend.title = element_text(face = "bold", size = 11),
-    legend.text = element_text(size = 10)
+    legend.title = element_text(face = "bold", size = 18),
+    legend.text = element_text(size = 16)
   ) +
   annotate("text", x = Inf, y = Inf, 
            label = sprintf("High RMST: n=%d\nLow RMST: n=%d", 
                          pathway_stats$n[1], pathway_stats$n[2]),
-           hjust = 1.1, vjust = 1.5, size = 3.5, color = "gray30")
+           hjust = 1.1, vjust = 1.5, size = 5, color = "gray30")
 
 ggsave("results/survival/figures/figS2b_pathway_distribution_by_rmst.png", 
        pathway_density_plot, 
@@ -2783,9 +2785,9 @@ if (nrow(performance_plot_data) > 0) {
     theme_nature() +
     theme(
       legend.position = "none",
-      plot.title = element_text(face = "bold", size = 14),
-      strip.text = element_text(face = "bold", size = 11),
-      axis.text.x = element_text(angle = 45, hjust = 1)
+      plot.title = element_text(face = "bold", size = 20),
+      strip.text = element_text(face = "bold", size = 18),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 16)
     )
   
   ggsave("results/survival/figures/figS3_model_performance_comparison.png", performance_comparison_plot,
@@ -2833,7 +2835,7 @@ if (!is.na(performance_results$glmnet$rmst_cor) &&
                label = sprintf("R² = %.3f\nCorr = %.3f", 
                              performance_results$glmnet$rmst_rsq,
                              performance_results$glmnet$rmst_cor),
-               hjust = 0, vjust = 1, size = 5, fontface = "bold") +
+               hjust = 0, vjust = 1, size = 6, fontface = "bold") +
       labs(
         title = "DR-GLMNET: Predicted vs Observed RMST",
         subtitle = "Test set performance (dashed line = perfect prediction)",
@@ -2841,7 +2843,7 @@ if (!is.na(performance_results$glmnet$rmst_cor) &&
         y = "Predicted RMST (months)"
       ) +
       theme_nature() +
-      theme(plot.title = element_text(face = "bold", size = 14))
+      theme(plot.title = element_text(face = "bold", size = 20))
     
     ggsave("results/survival/figures/figS4_glmnet_rmst_prediction.png", rmst_pred_plot,
            width = FIGURE_WIDTH, height = FIGURE_HEIGHT, dpi = FIGURE_DPI, bg = "white")
